@@ -1,17 +1,25 @@
-import { Img } from "remotion";
+import { Img, useCurrentFrame, useVideoConfig } from "remotion";
 import type { ResolvedConfig } from "../../lib/resolved";
 import { micBox } from "../../lib/coords";
 import { srcFor } from "../assets";
+import { entranceAnim } from "../anim";
 
 export function Mic({ mic }: { mic: ResolvedConfig["content"]["mic"] }) {
   const b = micBox(mic);
+
+  // Mic pops up from below shortly after the teleprompter, with a gentle bounce.
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const enter = entranceAnim(frame, fps, { delay: 8, bounce: true, fromScale: 0.86, rise: 34 });
+
   const style: React.CSSProperties = {
     position: "absolute",
     left: b.left,
     top: b.top,
     width: b.width,
     height: b.height,
-    transform: `rotate(${mic.rotation}deg)`,
+    opacity: enter.opacity,
+    transform: `translateY(${enter.translateY}px) rotate(${mic.rotation}deg) scaleX(${mic.flipH ? -1 : 1}) scaleY(${mic.flipV ? -1 : 1}) scale(${enter.scale})`,
     transformOrigin: "center",
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,.5))",
   };

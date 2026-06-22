@@ -1,6 +1,7 @@
-import { Img } from "remotion";
+import { Img, useCurrentFrame, useVideoConfig } from "remotion";
 import type { ResolvedConfig } from "../../lib/resolved";
 import { deviceBox } from "../../lib/coords";
+import { entranceAnim } from "../anim";
 import { Teleprompter } from "./Teleprompter";
 
 export function Device({
@@ -17,6 +18,12 @@ export function Device({
   const screenW = b.width * screen.w;
   const screenH = b.height * screen.h;
 
+  // Small entrance when the main content begins (frame resets to 0 here because
+  // the Content scene is a Sequence). The teleprompter leads, the mic follows.
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const enter = entranceAnim(frame, fps, { fromScale: 0.94, rise: 16 });
+
   return (
     <div
       style={{
@@ -25,7 +32,8 @@ export function Device({
         top: b.top,
         width: b.width,
         height: b.height,
-        transform: `rotate(${device.rotation}deg)`,
+        opacity: enter.opacity,
+        transform: `translateY(${enter.translateY}px) rotate(${device.rotation}deg) scale(${enter.scale})`,
         transformOrigin: "center",
       }}
     >
