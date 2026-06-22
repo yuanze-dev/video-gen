@@ -1,6 +1,7 @@
 import { Img, useCurrentFrame, useVideoConfig } from "remotion";
 import type { ResolvedConfig } from "../../lib/resolved";
 import { deviceBox } from "../../lib/coords";
+import { srcFor } from "../assets";
 import { entranceAnim } from "../anim";
 import { Teleprompter } from "./Teleprompter";
 
@@ -14,6 +15,7 @@ export function Device({
   contentFrames: number;
 }) {
   const b = deviceBox(device);
+  const src = srcFor(device.asset);
   const screen = teleprompter.screen;
   const screenW = b.width * screen.w;
   const screenH = b.height * screen.h;
@@ -37,10 +39,9 @@ export function Device({
         transformOrigin: "center",
       }}
     >
-      {/* device graphic */}
-      {!device.asset.builtin && device.asset.src ? (
+      {src ? (
         <Img
-          src={device.asset.src}
+          src={src}
           style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
         />
       ) : (
@@ -50,26 +51,12 @@ export function Device({
             inset: 0,
             background: "#0b0b0e",
             borderRadius: b.width * 0.13,
-            boxShadow: "0 36px 70px rgba(0,0,0,.55), inset 0 0 0 7px #2a2a30, 0 0 0 4px #000",
+            boxShadow: "0 36px 70px rgba(0,0,0,.55), inset 0 0 0 7px #2a2a30",
           }}
-        >
-          <div
-            style={{
-              position: "absolute",
-              top: b.height * 0.025,
-              left: "50%",
-              transform: "translateX(-50%)",
-              width: b.width * 0.28,
-              height: b.height * 0.018,
-              background: "#000",
-              borderRadius: 999,
-              zIndex: 3,
-            }}
-          />
-        </div>
+        />
       )}
 
-      {/* teleprompter screen */}
+      {/* teleprompter screen — sits on top of the device image's black screen */}
       <div
         style={{
           position: "absolute",
@@ -78,9 +65,8 @@ export function Device({
           width: screenW,
           height: screenH,
           overflow: "hidden",
-          borderRadius: b.width * 0.08,
+          borderRadius: b.width * 0.04,
           background: "#000",
-          zIndex: 2,
         }}
       >
         <Teleprompter

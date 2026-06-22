@@ -4,11 +4,20 @@ import { create } from "zustand";
 import { ProjectConfig, makeDefaultConfig, type AssetRef } from "./config-schema";
 import { getMediaDuration } from "./media";
 
-export type DragTarget = "mic" | "device";
+export type ContentTarget = "mic" | "device";
+export type OpeningTarget = "title" | "countdown";
+export type DragTarget = ContentTarget | OpeningTarget;
 export type AssetTarget = "background" | "mic" | "device" | "teleVideo" | "bgm" | "sfx";
 export type SceneView = "opening" | "content";
 
-type Patch = Partial<{ x: number; y: number; scale: number; rotation: number }>;
+type Patch = Partial<{
+  x: number;
+  y: number;
+  scale: number;
+  rotation: number;
+  flipH: boolean;
+  flipV: boolean;
+}>;
 
 type State = {
   config: ProjectConfig;
@@ -22,13 +31,16 @@ type State = {
 
   setTitleText: (t: string) => void;
   toggleCountdown: (enabled: boolean) => void;
+  setCountdownSpeed: (speed: number) => void;
   setTeleMode: (mode: "text" | "video") => void;
   setTeleText: (content: string) => void;
   setTeleSpeed: (speed: number) => void;
   setKeepAudio: (keep: boolean) => void;
   setBgmVolume: (v: number) => void;
 
-  setTransform: (target: DragTarget, patch: Patch) => void;
+  setTransform: (target: ContentTarget, patch: Patch) => void;
+  setOpeningPos: (target: OpeningTarget, patch: Partial<{ x: number; y: number }>) => void;
+  setScreen: (patch: Partial<{ x: number; y: number; w: number; h: number }>) => void;
   addAsset: (target: AssetTarget, file: File) => Promise<void>;
 
   loadConfig: (cfg: ProjectConfig) => void;
@@ -71,6 +83,17 @@ export const useEditor = create<State>((set, get) => ({
         opening: {
           ...s.config.opening,
           countdown: { ...s.config.opening.countdown, enabled },
+        },
+      },
+    })),
+
+  setCountdownSpeed: (speed) =>
+    set((s) => ({
+      config: {
+        ...s.config,
+        opening: {
+          ...s.config.opening,
+          countdown: { ...s.config.opening.countdown, speed },
         },
       },
     })),
@@ -156,6 +179,34 @@ export const useEditor = create<State>((set, get) => ({
       };
     }),
 
+  setOpeningPos: (target, patch) =>
+    set((s) => {
+      const node = s.config.opening[target];
+      return {
+        config: {
+          ...s.config,
+          opening: {
+            ...s.config.opening,
+            [target]: { ...node, pos: { ...node.pos, ...patch } },
+          },
+        },
+      };
+    }),
+
+  setScreen: (patch) =>
+    set((s) => ({
+      config: {
+        ...s.config,
+        content: {
+          ...s.config.content,
+          teleprompter: {
+            ...s.config.content.teleprompter,
+            screen: { ...s.config.content.teleprompter.screen, ...patch },
+          },
+        },
+      },
+    })),
+
   addAsset: async (target, file) => {
     const id = newAssetId();
     const url = URL.createObjectURL(file);
@@ -191,7 +242,7 @@ export const useEditor = create<State>((set, get) => ({
           };
           break;
         case "bgm":
-          content.bgm = { asset: ref, volume: content.bgm?.volume ?? 0.55 };
+          content.bgm = { asset: ref, volume: content.bgm?.volume ?? 1 };
           break;
         case "sfx":
           opening.curtain = { ...opening.curtain, sfx: ref };

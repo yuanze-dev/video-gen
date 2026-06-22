@@ -6,6 +6,7 @@ import type { ResolvedAsset } from "../lib/resolved";
 const BUILTIN_FILES: Record<string, string> = {
   airport: "assets/builtin/airport.jpg",
   mic: "assets/builtin/microphone.png",
+  phone: "assets/builtin/teleprompter.png",
   "open-sfx": "assets/builtin/open-sfx.mp3",
   "airport-bgm": "assets/builtin/airport-bgm.mp3",
 };

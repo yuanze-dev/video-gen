@@ -11,6 +11,8 @@ export const Transform = z.object({
   y: z.number(), // normalized center Y
   scale: z.number().min(0.2).max(3).default(1),
   rotation: z.number().default(0), // degrees
+  flipH: z.boolean().default(false), // mirror horizontally
+  flipV: z.boolean().default(false), // mirror vertically
 });
 
 // Inset rectangle (fractions 0..1) of the device box that acts as the
@@ -49,6 +51,8 @@ export const ProjectConfig = z.object({
     countdown: z.object({
       enabled: z.boolean().default(true),
       from: z.number().int().min(1).max(10).default(3),
+      speed: z.number().min(0.5).max(3).default(2), // ticks/sec multiplier
+      pos: Point.default({ x: 0.5, y: 0.72 }),
     }),
     curtain: z.object({
       color: z.string().default("#d11069"),
@@ -79,7 +83,7 @@ export const ProjectConfig = z.object({
         .optional(),
     }),
     bgm: z
-      .object({ asset: AssetRef, volume: z.number().min(0).max(1).default(0.55) })
+      .object({ asset: AssetRef, volume: z.number().min(0).max(1).default(1) })
       .nullable()
       .default(null),
   }),
@@ -105,7 +109,7 @@ export function makeDefaultConfig(): ProjectConfig {
         stroke: true,
         pos: { x: 0.5, y: 0.42 },
       },
-      countdown: { enabled: true, from: 3 },
+      countdown: { enabled: true, from: 3, speed: 2, pos: { x: 0.5, y: 0.72 } },
       curtain: {
         color: "#d11069",
         openDurationSec: 1.4,
@@ -116,15 +120,16 @@ export function makeDefaultConfig(): ProjectConfig {
       background: { kind: "builtin", id: "airport" },
       mic: {
         asset: { kind: "builtin", id: "mic" },
-        transform: { x: 0.78, y: 0.17, scale: 1, rotation: 0 },
+        transform: { x: 0.78, y: 0.17, scale: 1, rotation: 0, flipH: false, flipV: false },
       },
       device: {
         asset: { kind: "builtin", id: "phone" },
-        transform: { x: 0.5, y: 0.6, scale: 1, rotation: -3 },
+        transform: { x: 0.55, y: 0.58, scale: 1, rotation: 0, flipH: false, flipV: false },
       },
       teleprompter: {
         mode: "text",
-        screen: { x: 0.075, y: 0.04, w: 0.85, h: 0.92 },
+        // aligned to the black screen inside the built-in device image (measured)
+        screen: { x: 0.114, y: 0.02, w: 0.575, h: 0.86 },
         text: {
           content: DEFAULT_TELEPROMPTER_TEXT,
           fontSize: 60,
@@ -134,7 +139,7 @@ export function makeDefaultConfig(): ProjectConfig {
           speed: 1,
         },
       },
-      bgm: { asset: { kind: "builtin", id: "airport-bgm" }, volume: 0.55 },
+      bgm: { asset: { kind: "builtin", id: "airport-bgm" }, volume: 1 },
     },
   };
 }

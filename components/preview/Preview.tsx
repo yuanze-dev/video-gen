@@ -9,7 +9,7 @@ import { resolveConfig } from "@/lib/resolved";
 import { totalFrames, openingFrames, contentFrames } from "@/lib/duration";
 import { micBox, deviceBox } from "@/lib/coords";
 import { CANVAS } from "@/lib/constants";
-import { useEditor, type DragTarget } from "@/lib/store";
+import { useEditor, type DragTarget, type ContentTarget, type OpeningTarget } from "@/lib/store";
 
 const Player = dynamic(() => import("@remotion/player").then((m) => m.Player), {
   ssr: false,
@@ -28,7 +28,23 @@ type DragState =
       startNY: number;
       startScale: number;
       startBoxW: number;
+    }
+  | {
+      kind: "screen-move" | "screen-resize";
+      startX: number;
+      startY: number;
+      sx: number;
+      sy: number;
+      sw: number;
+      sh: number;
+      devW: number;
+      devH: number;
     };
+
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+const COUNTDOWN_FONT = 170; // canvas px, mirrors Countdown.tsx
+const isOpening = (t: DragTarget): t is OpeningTarget => t === "title" || t === "countdown";
 
 export function Preview() {
   const config = useEditor((s) => s.config);
@@ -38,6 +54,8 @@ export function Preview() {
   const selected = useEditor((s) => s.selected);
   const setSelected = useEditor((s) => s.setSelected);
   const setTransform = useEditor((s) => s.setTransform);
+  const setOpeningPos = useEditor((s) => s.setOpeningPos);
+  const setScreen = useEditor((s) => s.setScreen);
   const addAsset = useEditor((s) => s.addAsset);
 
   const resolved = useMemo(() => resolveConfig(config, assetUrls), [config, assetUrls]);
@@ -95,7 +113,8 @@ export function Preview() {
       p.addEventListener("frameupdate", onFrame);
       p.addEventListener("play", onPlay);
       p.addEventListener("pause", onPause);
-      p.seekTo(frameForView("opening"));
+      // Open on the very first frame — the closed curtain doubles as the cover.
+      p.seekTo(0);
     };
     attach();
     return () => {
@@ -122,7 +141,7 @@ export function Preview() {
   };
 
   // ---- drag / resize ----
-  const onPointerDownEl = (e: React.PointerEvent, target: DragTarget) => {
+  const onPointerDownEl = (e: React.PointerEvent, target: ContentTarget) => {
     if (playing) return;
     e.preventDefault();
     setSelected(target);
@@ -140,7 +159,7 @@ export function Preview() {
     };
   };
 
-  const onPointerDownHandle = (e: React.PointerEvent, target: DragTarget) => {
+  const onPointerDownHandle = (e: React.PointerEvent, target: ContentTarget) => {
     if (playing) return;
     e.preventDefault();
     e.stopPropagation();
@@ -159,6 +178,44 @@ export function Preview() {
     };
   };
 
+  const onScreenPointerDown = (e: React.PointerEvent, mode: "screen-move" | "screen-resize") => {
+    if (playing) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setSelected("device");
+    const dev = deviceBox(config.content.device.transform);
+    const sc = config.content.teleprompter.screen;
+    dragRef.current = {
+      kind: mode,
+      startX: e.clientX,
+      startY: e.clientY,
+      sx: sc.x,
+      sy: sc.y,
+      sw: sc.w,
+      sh: sc.h,
+      devW: dev.width * sf,
+      devH: dev.height * sf,
+    };
+  };
+
+  // ---- opening elements (title / countdown): move only ----
+  const onPointerDownOpening = (e: React.PointerEvent, target: OpeningTarget) => {
+    if (playing) return;
+    e.preventDefault();
+    setSelected(target);
+    const pos = config.opening[target].pos;
+    dragRef.current = {
+      kind: "move",
+      target,
+      startX: e.clientX,
+      startY: e.clientY,
+      startNX: pos.x,
+      startNY: pos.y,
+      startScale: 1,
+      startBoxW: 0,
+    };
+  };
+
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const d = dragRef.current;
@@ -166,15 +223,22 @@ export function Preview() {
       if (d.kind === "move") {
         const nx = d.startNX + (e.clientX - d.startX) / boxW;
         const ny = d.startNY + (e.clientY - d.startY) / (boxW * ASPECT);
-        setTransform(d.target, {
-          x: Math.max(-0.1, Math.min(1.1, nx)),
-          y: Math.max(-0.1, Math.min(1.1, ny)),
-        });
-      } else {
+        if (isOpening(d.target)) {
+          setOpeningPos(d.target, { x: clamp(nx, 0, 1), y: clamp(ny, 0, 1) });
+        } else {
+          setTransform(d.target, { x: clamp(nx, -0.1, 1.1), y: clamp(ny, -0.1, 1.1) });
+        }
+      } else if (d.kind === "resize" && !isOpening(d.target)) {
         const next = (d.startBoxW + (e.clientX - d.startX)) / d.startBoxW;
-        setTransform(d.target, {
-          scale: Math.max(0.4, Math.min(2.5, d.startScale * next)),
-        });
+        setTransform(d.target, { scale: clamp(d.startScale * next, 0.4, 2.5) });
+      } else if (d.kind === "screen-move") {
+        const dx = (e.clientX - d.startX) / d.devW;
+        const dy = (e.clientY - d.startY) / d.devH;
+        setScreen({ x: clamp(d.sx + dx, 0, 1 - d.sw), y: clamp(d.sy + dy, 0, 1 - d.sh) });
+      } else if (d.kind === "screen-resize") {
+        const dw = (e.clientX - d.startX) / d.devW;
+        const dh = (e.clientY - d.startY) / d.devH;
+        setScreen({ w: clamp(d.sw + dw, 0.1, 1 - d.sx), h: clamp(d.sh + dh, 0.1, 1 - d.sy) });
       }
     };
     const onUp = () => {
@@ -186,15 +250,43 @@ export function Preview() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, [boxW, setTransform]);
+  }, [boxW, setTransform, setOpeningPos, setScreen]);
 
-  const showOverlay = view === "content" && !playing && boxW > 0;
+  const showOverlay = !playing && boxW > 0;
+
+  // Approximate canvas-px bounding box of an opening element (centered on pos),
+  // used only as a draggable affordance — exact text metrics aren't needed.
+  const openingBox = (target: OpeningTarget) => {
+    if (target === "title") {
+      const { pos, fontSize, text } = config.opening.title;
+      const width = CANVAS.width * 0.84;
+      const charsPerLine = Math.max(1, Math.floor(width / (fontSize * 0.55)));
+      const lines = Math.max(1, Math.ceil(text.trim().length / charsPerLine));
+      const height = lines * fontSize * 1.15;
+      return { left: pos.x * CANVAS.width - width / 2, top: pos.y * CANVAS.height - height / 2, width, height };
+    }
+    const { pos } = config.opening.countdown;
+    const width = COUNTDOWN_FONT * 0.8;
+    const height = COUNTDOWN_FONT * 1.1;
+    return { left: pos.x * CANVAS.width - width / 2, top: pos.y * CANVAS.height - height / 2, width, height };
+  };
 
   const dispBox = (target: DragTarget) => {
-    const t = config.content[target].transform;
-    const b = target === "mic" ? micBox(t) : deviceBox(t);
+    const b = isOpening(target)
+      ? openingBox(target)
+      : target === "mic"
+        ? micBox(config.content.mic.transform)
+        : deviceBox(config.content.device.transform);
     return { left: b.left * sf, top: b.top * sf, width: b.width * sf, height: b.height * sf };
   };
+
+  // which draggable elements belong to the current scene
+  const overlayTargets: DragTarget[] =
+    view === "opening"
+      ? config.opening.countdown.enabled
+        ? ["title", "countdown"]
+        : ["title"]
+      : ["device", "mic"];
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4">
@@ -243,9 +335,33 @@ export function Preview() {
 
         {/* interaction overlay */}
         {showOverlay
-          ? (["device", "mic"] as const).map((target) => {
+          ? overlayTargets.map((target) => {
               const b = dispBox(target);
               const on = selected === target;
+
+              if (isOpening(target)) {
+                return (
+                  <div
+                    key={target}
+                    onPointerDown={(e) => onPointerDownOpening(e, target)}
+                    className="absolute cursor-move"
+                    style={{
+                      left: b.left,
+                      top: b.top,
+                      width: b.width,
+                      height: b.height,
+                      outline: on ? "2px solid #ff2d7e" : "1px dashed rgba(255,255,255,.35)",
+                      outlineOffset: 2,
+                      borderRadius: 4,
+                    }}
+                  >
+                    <span className="pointer-events-none absolute -top-6 left-0 whitespace-nowrap rounded-md bg-black/70 px-2 py-0.5 text-[10px] text-white">
+                      {target === "title" ? "标题" : "倒计时"}
+                    </span>
+                  </div>
+                );
+              }
+
               return (
                 <div
                   key={target}
@@ -263,16 +379,42 @@ export function Preview() {
                 >
                   {on ? (
                     <>
-                      <button
+                      <div
+                        className="absolute -top-8 left-0 flex gap-1"
                         onPointerDown={(e) => e.stopPropagation()}
-                        onClick={() => {
-                          replaceInputRef.current?.setAttribute("data-target", target);
-                          replaceInputRef.current?.click();
-                        }}
-                        className="absolute -top-7 left-0 whitespace-nowrap rounded-md bg-[#ff2d7e] px-2 py-1 text-[10px] text-white"
                       >
-                        ↻ 替换素材
-                      </button>
+                        <button
+                          onClick={() => {
+                            replaceInputRef.current?.setAttribute("data-target", target);
+                            replaceInputRef.current?.click();
+                          }}
+                          className="whitespace-nowrap rounded-md bg-[#ff2d7e] px-2 py-1 text-[10px] text-white"
+                        >
+                          ↻ 替换
+                        </button>
+                        {target === "mic" ? (
+                          <>
+                            <button
+                              title="左右翻转"
+                              onClick={() =>
+                                setTransform("mic", { flipH: !config.content.mic.transform.flipH })
+                              }
+                              className="rounded-md bg-black/70 px-2 py-1 text-[10px] text-white"
+                            >
+                              ↔
+                            </button>
+                            <button
+                              title="上下翻转"
+                              onClick={() =>
+                                setTransform("mic", { flipV: !config.content.mic.transform.flipV })
+                              }
+                              className="rounded-md bg-black/70 px-2 py-1 text-[10px] text-white"
+                            >
+                              ↕
+                            </button>
+                          </>
+                        ) : null}
+                      </div>
                       <span
                         onPointerDown={(e) => onPointerDownHandle(e, target)}
                         className="absolute -bottom-2 -right-2 size-4 cursor-nwse-resize rounded-full border-2 border-[#ff2d7e] bg-white"
@@ -284,6 +426,41 @@ export function Preview() {
             })
           : null}
 
+        {/* teleprompter screen-region editor (shown when the device is selected) */}
+        {showOverlay && selected === "device"
+          ? (() => {
+              const dev = dispBox("device");
+              const sc = config.content.teleprompter.screen;
+              return (
+                <div
+                  onPointerDown={(e) => onScreenPointerDown(e, "screen-move")}
+                  className="absolute cursor-move"
+                  style={{
+                    left: dev.left + sc.x * dev.width,
+                    top: dev.top + sc.y * dev.height,
+                    width: sc.w * dev.width,
+                    height: sc.h * dev.height,
+                    outline: "2px dashed #22d3ee",
+                    outlineOffset: -1,
+                    background: "rgba(34,211,238,0.10)",
+                    borderRadius: 6,
+                  }}
+                >
+                  <span
+                    onPointerDown={(e) => e.stopPropagation()}
+                    className="absolute -top-6 left-0 whitespace-nowrap rounded bg-[#0891b2] px-1.5 py-0.5 text-[9px] text-white"
+                  >
+                    屏幕区 · 拖动/拉角贴合屏幕
+                  </span>
+                  <span
+                    onPointerDown={(e) => onScreenPointerDown(e, "screen-resize")}
+                    className="absolute -bottom-1.5 -right-1.5 size-3.5 cursor-nwse-resize rounded-full border-2 border-[#22d3ee] bg-white"
+                  />
+                </div>
+              );
+            })()
+          : null}
+
         <input
           ref={replaceInputRef}
           type="file"
@@ -291,7 +468,7 @@ export function Preview() {
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
-            const target = e.target.getAttribute("data-target") as DragTarget | null;
+            const target = e.target.getAttribute("data-target") as ContentTarget | null;
             if (f && target) void addAsset(target, f);
             e.target.value = "";
           }}

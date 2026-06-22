@@ -1,11 +1,22 @@
 import { useCurrentFrame, useVideoConfig } from "remotion";
 import { CANVAS, FONT_STACK } from "../../lib/constants";
 
-// Shows from, from-1, ... 1 over the first `from` seconds, then disappears.
-export function Countdown({ from }: { from: number }) {
+// Shows from, from-1, ... 1 over the first `from / speed` seconds, then disappears.
+// `speed` is a tick-rate multiplier: >1 counts down faster, <1 slower.
+export function Countdown({
+  from,
+  speed = 1,
+  x = 0.5,
+  y = 0.72,
+}: {
+  from: number;
+  speed?: number;
+  x?: number;
+  y?: number;
+}) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const sec = frame / fps;
+  const sec = (frame / fps) * speed;
   if (sec >= from) return null;
   const n = from - Math.floor(sec);
 
@@ -13,8 +24,8 @@ export function Countdown({ from }: { from: number }) {
     <div
       style={{
         position: "absolute",
-        left: CANVAS.width / 2,
-        top: CANVAS.height * 0.72,
+        left: x * CANVAS.width,
+        top: y * CANVAS.height,
         transform: "translate(-50%, -50%)",
         fontFamily: FONT_STACK,
         fontWeight: 900,

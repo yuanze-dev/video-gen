@@ -7,8 +7,8 @@ export const CANVAS = { width: 1080, height: 1920, fps: 60 } as const;
 export const MIC_BASE_W = 360; // microphone graphic width
 export const MIC_ASPECT = 940 / 1060; // h / w of the built-in mic image
 
-export const DEVICE_BASE_W = 560; // teleprompter device (phone) width
-export const DEVICE_ASPECT = 1.95; // h / w of the device box
+export const DEVICE_BASE_W = 820; // teleprompter device (hand + phone) width
+export const DEVICE_ASPECT = 2438 / 1798; // h / w of the built-in device image
 
 // Teleprompter text scroll speed (px per second at speed multiplier = 1).
 export const PX_PER_SEC = 130;

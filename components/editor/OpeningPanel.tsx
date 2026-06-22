@@ -2,14 +2,19 @@
 
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { useEditor } from "@/lib/store";
+
+const num = (v: number | readonly number[]) => (Array.isArray(v) ? v[0] : (v as number));
 
 export function OpeningPanel() {
   const titleText = useEditor((s) => s.config.opening.title.text);
   const countdownOn = useEditor((s) => s.config.opening.countdown.enabled);
+  const countdownSpeed = useEditor((s) => s.config.opening.countdown.speed);
   const setTitleText = useEditor((s) => s.setTitleText);
   const toggleCountdown = useEditor((s) => s.toggleCountdown);
+  const setCountdownSpeed = useEditor((s) => s.setCountdownSpeed);
   const setView = useEditor((s) => s.setView);
 
   return (
@@ -36,6 +41,23 @@ export function OpeningPanel() {
           <div className="text-[13px]">3·2·1 倒计时</div>
           <Switch checked={countdownOn} onCheckedChange={(v) => { toggleCountdown(v); setView("opening"); }} />
         </div>
+
+        {countdownOn && (
+          <div className="flex items-center gap-3">
+            <span className="w-16 text-[11px] text-muted-foreground">倒计时速度</span>
+            <Slider
+              min={0.5}
+              max={3}
+              step={0.1}
+              value={[countdownSpeed]}
+              onValueChange={(v) => { setCountdownSpeed(num(v)); setView("opening"); }}
+              className="flex-1"
+            />
+            <span className="w-10 text-right text-[11px] text-muted-foreground">
+              {countdownSpeed.toFixed(1)}×
+            </span>
+          </div>
+        )}
       </div>
     </section>
   );

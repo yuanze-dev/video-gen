@@ -22,7 +22,7 @@ export type ResolvedConfig = {
       x: number;
       y: number;
     };
-    countdown: { enabled: boolean; from: number };
+    countdown: { enabled: boolean; from: number; speed: number; x: number; y: number };
     curtain: { color: string; openDurationSec: number };
     sfx: ResolvedAsset | null;
   };
@@ -47,7 +47,7 @@ export type ResolvedConfig = {
   };
 };
 
-type Transform = { x: number; y: number; scale: number; rotation: number };
+type Transform = { x: number; y: number; scale: number; rotation: number; flipH: boolean; flipV: boolean };
 
 type UrlMap = Record<string, string | undefined>;
 
@@ -79,7 +79,13 @@ export function resolveConfig(cfg: ProjectConfig, urls: UrlMap): ResolvedConfig 
         x: cfg.opening.title.pos.x,
         y: cfg.opening.title.pos.y,
       },
-      countdown: { ...cfg.opening.countdown },
+      countdown: {
+        enabled: cfg.opening.countdown.enabled,
+        from: cfg.opening.countdown.from,
+        speed: cfg.opening.countdown.speed,
+        x: cfg.opening.countdown.pos.x,
+        y: cfg.opening.countdown.pos.y,
+      },
       curtain: {
         color: cfg.opening.curtain.color,
         openDurationSec: cfg.opening.curtain.openDurationSec,

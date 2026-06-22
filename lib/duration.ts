@@ -13,7 +13,7 @@ export function openingSec(cfg: ResolvedConfig): number {
   // Countdown and curtain run concurrently: the curtain finishes opening exactly
   // when the countdown reaches 0. So the opening lasts the countdown length.
   return cfg.opening.countdown.enabled
-    ? cfg.opening.countdown.from
+    ? cfg.opening.countdown.from / cfg.opening.countdown.speed
     : cfg.opening.curtain.openDurationSec;
 }
 
