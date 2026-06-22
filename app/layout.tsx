@@ -3,7 +3,7 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
-  title: "提词秀 · 竖屏视频生成器",
+  title: "小音符起号助手",
   description: "内部使用的竖屏提词/开幕短视频生成工具",
 };
 

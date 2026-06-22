@@ -28,7 +28,7 @@ export function TopBar() {
         <div className="grid size-8 place-items-center rounded-lg bg-gradient-to-br from-[#ff5ba0] to-[#ff2d7e] text-base shadow-lg shadow-[#ff2d7e]/40">
           🎤
         </div>
-        <span className="text-sm font-semibold leading-none">提词秀</span>
+        <span className="text-sm font-semibold leading-none">小音符起号助手</span>
       </div>
 
       <div className="flex-1" />
