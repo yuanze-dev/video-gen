@@ -1,0 +1,53 @@
+appId: com.yuanze.video-gen
+productName: 小音符起号助手
+copyright: © 原则科技 Yuanze
+
+directories:
+  output: release
+  buildResources: build
+
+# The editor UI is loaded remotely (Vercel), so the app only needs the Electron
+# main/preload bundles plus @remotion/renderer and its native compositor. Strip
+# the build-time-only and UI-only heavyweights that never run on the desktop.
+files:
+  - "**/*"
+  - "!**/*.map"
+  - "!.next${/*}"
+  - "!public/remotion-site${/*}"
+  - "!.remotion-build${/*}"
+  - "!release${/*}"
+  - "!**/*.ts"
+  - "!**/*.tsx"
+  - "!node_modules/next${/*}"
+  - "!node_modules/@remotion/bundler${/*}"
+  - "!node_modules/@remotion/studio${/*}"
+  - "!node_modules/@next${/*}"
+  - "!node_modules/webpack${/*}"
+  - "!node_modules/typescript${/*}"
+  - "!node_modules/electron${/*}"
+  - "!node_modules/electron-builder${/*}"
+  - "!node_modules/esbuild${/*}"
+  - "!node_modules/.cache${/*}"
+
+# chrome-headless-shell can't live inside the read-only asar; ship it alongside.
+extraResources:
+  - from: node_modules/.remotion/chrome-headless-shell
+    to: render-bin/chrome-headless-shell
+
+asar: true
+# Native binaries must be on the real filesystem to be executed/dlopen'd.
+asarUnpack:
+  - "node_modules/@remotion/compositor-darwin-arm64/**/*"
+  - "node_modules/@remotion/renderer/**/*"
+
+npmRebuild: false
+
+mac:
+  category: public.app-category.video
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  # First pass is an UNSIGNED dev build. For team distribution, supply an Apple
+  # Developer ID and enable notarization (see plan: signing is a prerequisite).
+  identity: null

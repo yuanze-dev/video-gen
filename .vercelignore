@@ -1,0 +1,9 @@
+node_modules
+.next
+.git
+release
+electron
+electron/dist
+public/remotion-site
+.remotion-build
+*.dmg

@@ -2,11 +2,18 @@
   "name": "video-gen",
   "version": "0.1.0",
   "private": true,
+  "description": "小音符起号助手 — 提词器视频生成器（本机渲染桌面版）",
+  "author": "原则科技 Yuanze",
+  "main": "electron/dist/main.cjs",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build:remotion-site": "node scripts/build-remotion-site.mjs",
+    "build": "npm run build:remotion-site && next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "build:electron": "node scripts/build-electron.mjs",
+    "electron:dev": "npm run build:electron && electron .",
+    "electron:build": "npm run build:remotion-site && npm run build:electron && electron-builder --mac"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -37,6 +44,9 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "electron": "^42.4.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.1",
     "eslint": "^9",
     "eslint-config-next": "16.2.9",
     "tailwindcss": "^4",

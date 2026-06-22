@@ -17,6 +17,14 @@
 /.next/
 /out/
 
+# generated build artifacts
+/public/remotion-site/
+/electron/dist/
+/.remotion-build/
+
+# electron-builder output
+/release/
+
 # production
 /build
 
