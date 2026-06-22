@@ -14,5 +14,6 @@ export async function GET(_req: Request, { params }: { params: Promise<{ jobId: 
     progress: job.progress,
     error: job.error,
     url: job.status === "done" ? `/api/render/${jobId}/download` : undefined,
+    coverUrl: job.status === "done" && job.coverPath ? `/api/render/${jobId}/cover` : undefined,
   });
 }

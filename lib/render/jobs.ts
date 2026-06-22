@@ -12,6 +12,7 @@ export type Job = {
   progress: number; // 0..1
   dir: string;
   outputPath?: string;
+  coverPath?: string; // first-frame still, used as the video cover
   error?: string;
   assets: Record<string, { file: string; mime: string }>;
 };
@@ -69,10 +70,12 @@ export async function startRender(job: Job, cfgJson: unknown, origin: string) {
 
   job.status = "rendering";
   try {
-    const { selectComposition, renderMedia, ensureBrowser } = await import("@remotion/renderer");
+    const { selectComposition, renderMedia, renderStill, ensureBrowser } =
+      await import("@remotion/renderer");
     await ensureBrowser();
     const serveUrl = await getBundle();
     const composition = await selectComposition({ serveUrl, id: "Teleprompter", inputProps });
+
     const outputPath = path.join(job.dir, "out.mp4");
     await renderMedia({
       serveUrl,
@@ -86,6 +89,21 @@ export async function startRender(job: Job, cfgJson: unknown, origin: string) {
       },
     });
     job.outputPath = outputPath;
+
+    // Cover = the very first frame (the closed curtain).
+    const coverPath = path.join(job.dir, "cover.jpg");
+    await renderStill({
+      serveUrl,
+      composition,
+      frame: 0,
+      output: coverPath,
+      inputProps,
+      imageFormat: "jpeg",
+      jpegQuality: 90,
+      chromiumOptions: { gl: "angle" },
+    });
+    job.coverPath = coverPath;
+
     job.progress = 1;
     job.status = "done";
   } catch (e) {

@@ -32,6 +32,7 @@ type State = {
   setTitleText: (t: string) => void;
   toggleCountdown: (enabled: boolean) => void;
   setCountdownSpeed: (speed: number) => void;
+  setCurtainColor: (color: string) => void;
   setTeleMode: (mode: "text" | "video") => void;
   setTeleText: (content: string) => void;
   setTeleSpeed: (speed: number) => void;
@@ -94,6 +95,17 @@ export const useEditor = create<State>((set, get) => ({
         opening: {
           ...s.config.opening,
           countdown: { ...s.config.opening.countdown, speed },
+        },
+      },
+    })),
+
+  setCurtainColor: (color) =>
+    set((s) => ({
+      config: {
+        ...s.config,
+        opening: {
+          ...s.config.opening,
+          curtain: { ...s.config.opening.curtain, color },
         },
       },
     })),

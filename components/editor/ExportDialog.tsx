@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, Loader2 } from "lucide-react";
+import { Download, Image as ImageIcon, Loader2 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -30,6 +30,7 @@ export function ExportDialog() {
   const [progress, setProgress] = useState(0);
   const [stat, setStat] = useState("准备渲染任务…");
   const [url, setUrl] = useState<string | null>(null);
+  const [coverUrl, setCoverUrl] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopPoll = () => {
@@ -44,6 +45,7 @@ export function ExportDialog() {
     setProgress(0);
     setStat("打包素材，提交渲染任务…");
     setUrl(null);
+    setCoverUrl(null);
     try {
       const { config, assetUrls, fileNames } = useEditor.getState();
       const fd = new FormData();
@@ -69,6 +71,7 @@ export function ExportDialog() {
             setProgress(100);
             setStat("渲染完成 ✓");
             setUrl(s.url);
+            setCoverUrl(s.coverUrl ?? null);
             setPhase("done");
           } else if (s.status === "error") {
             stopPoll();
@@ -129,13 +132,25 @@ export function ExportDialog() {
             {stat}
           </div>
           {phase === "done" && url ? (
-            <Button
-              nativeButton={false}
-              render={<a href={url} download />}
-              className="w-full bg-[#ff2d7e] text-white hover:bg-[#ff2d7e]/90"
-            >
-              <Download className="size-4" /> 下载到本地
-            </Button>
+            <div className="space-y-2">
+              <Button
+                nativeButton={false}
+                render={<a href={url} download />}
+                className="w-full bg-[#ff2d7e] text-white hover:bg-[#ff2d7e]/90"
+              >
+                <Download className="size-4" /> 下载视频
+              </Button>
+              {coverUrl ? (
+                <Button
+                  nativeButton={false}
+                  variant="outline"
+                  render={<a href={coverUrl} download />}
+                  className="w-full"
+                >
+                  <ImageIcon className="size-4" /> 下载封面图（第一帧）
+                </Button>
+              ) : null}
+            </div>
           ) : null}
           {phase === "error" ? (
             <Button variant="outline" className="w-full" onClick={() => void start()}>
