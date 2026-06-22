@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>提词秀 · 竖屏视频生成器（极简原型）</title>
+<style>
+  :root{
+    --bg:#0e0e12; --panel:#15151b; --panel-2:#1d1d25; --panel-3:#262630;
+    --line:#2a2a35; --line-soft:#222029;
+    --txt:#ececf2; --txt-dim:#9a9aab; --txt-faint:#6a6a79;
+    --accent:#ff2d7e; --accent-soft:rgba(255,45,126,.14); --accent-2:#7c5cff; --ok:#36d399;
+    --radius:14px; --shadow:0 10px 40px rgba(0,0,0,.5);
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;}
+  body{
+    background:var(--bg);color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:13px;-webkit-font-smoothing:antialiased;overflow:hidden;user-select:none;
+  }
+  button{font-family:inherit;color:inherit;cursor:pointer;border:none;background:none;}
+  input,textarea,select{font-family:inherit;}
+
+  .app{display:grid;grid-template-rows:56px 1fr;height:100vh;}
+
+  /* topbar */
+  .topbar{display:flex;align-items:center;gap:14px;padding:0 18px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#17171e,#121218);}
+  .brand{display:flex;align-items:center;gap:10px;}
+  .brand .logo{width:30px;height:30px;border-radius:9px;background:radial-gradient(120% 120% at 30% 20%,#ff5ba0,var(--accent));
+    display:grid;place-items:center;font-size:16px;box-shadow:0 2px 12px rgba(255,45,126,.5);}
+  .brand b{font-size:15px;}
+  .brand small{color:var(--txt-faint);margin-left:3px;font-size:11px;}
+  .topbar .spacer{flex:1;}
+  .proj{color:var(--txt-dim);font-size:12.5px;}
+  .btn{border:1px solid var(--line);background:var(--panel-2);padding:9px 15px;border-radius:10px;
+    font-size:12.5px;display:inline-flex;align-items:center;gap:7px;transition:.15s;}
+  .btn:hover{background:var(--panel-3);}
+  .btn.primary{background:linear-gradient(180deg,#ff4f93,var(--accent));border-color:transparent;color:#fff;font-weight:600;
+    box-shadow:0 4px 16px rgba(255,45,126,.35);}
+  .btn.primary:hover{filter:brightness(1.07);}
+
+  .main{display:grid;grid-template-columns:minmax(400px,460px) 1fr;min-height:0;}
+
+  /* ===== left: preview ===== */
+  .stage{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+    order:2;
+    background:radial-gradient(700px 500px at 50% 0%,#1a1a23,transparent),
+              repeating-linear-gradient(45deg,#101015 0 18px,#0f0f14 18px 36px);}
+  .peek{display:flex;background:#00000066;border:1px solid var(--line);border-radius:22px;padding:4px;gap:3px;backdrop-filter:blur(6px);}
+  .peek button{padding:6px 16px;border-radius:18px;font-size:12px;color:var(--txt-dim);}
+  .peek button.on{background:var(--accent);color:#fff;font-weight:600;}
+
+  .canvas{position:relative;width:300px;height:533px;border-radius:22px;overflow:hidden;background:#000;
+    box-shadow:0 24px 70px rgba(0,0,0,.6),0 0 0 1px #ffffff12;}
+
+  /* background airport */
+  .bg-airport{position:absolute;inset:0;background:
+      radial-gradient(60% 38% at 50% 6%,rgba(255,221,170,.55),transparent 70%),
+      linear-gradient(180deg,#d9c39a 0%,#e7d5ac 26%,#b7c3cf 27%,#9fb0bd 33%,#8b97a0 49%,#6f6457 50%,#5a4f43 70%,#3c332a 100%);}
+  .bg-airport::before{content:"";position:absolute;left:0;right:0;top:0;height:27%;
+    background:repeating-linear-gradient(90deg,transparent 0 28px,rgba(255,255,255,.16) 28px 31px),
+               repeating-linear-gradient(0deg,rgba(255,255,255,.05) 0 8px,transparent 8px 22px);}
+  .bg-airport::after{content:"";position:absolute;left:0;right:0;top:40%;height:22%;
+    background:radial-gradient(13px 28px at 12% 70%,#2c2620cc,transparent 70%),
+      radial-gradient(12px 24px at 24% 78%,#322a22cc,transparent 70%),
+      radial-gradient(15px 32px at 78% 64%,#241f19cc,transparent 70%),
+      radial-gradient(12px 26px at 89% 74%,#2c2620cc,transparent 70%);}
+
+  .el{position:absolute;}
+  .el.sel{outline:1.5px dashed var(--accent);outline-offset:2px;border-radius:6px;}
+  #el-mic{right:16px;top:0;width:108px;transform-origin:top right;cursor:move;}
+  #el-mic svg{display:block;width:100%;height:auto;filter:drop-shadow(0 6px 10px rgba(0,0,0,.5));}
+
+  #el-device{left:70px;top:232px;width:158px;transform-origin:center;cursor:move;}
+  .phone{position:relative;width:100%;aspect-ratio:158/312;background:#0b0b0e;border-radius:24px;padding:9px;
+    box-shadow:0 14px 30px rgba(0,0,0,.55),inset 0 0 0 2px #2a2a30,0 0 0 3px #000;}
+  .phone .notch{position:absolute;top:8px;left:50%;transform:translateX(-50%);width:42px;height:10px;background:#000;border-radius:9px;z-index:3;}
+  .screen{position:relative;width:100%;height:100%;background:#000;border-radius:16px;overflow:hidden;}
+  .tele-track{position:absolute;left:0;right:0;top:0;padding:13px 13px 60px;color:#fff;font-weight:800;font-size:19px;line-height:1.18;}
+  .tele-video{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;
+    background:radial-gradient(120% 120% at 50% 40%,#26313f,#0b0e12);color:#cfe0ff;}
+  .tele-video .play{width:44px;height:44px;border-radius:50%;background:#ffffff1f;border:1px solid #ffffff3a;display:grid;place-items:center;font-size:16px;}
+  .tele-video small{font-size:10px;color:#9fb3cf;text-align:center;line-height:1.4;}
+  .hand{position:absolute;left:-9%;right:-9%;bottom:-7%;height:42%;z-index:2;pointer-events:none;
+    background:radial-gradient(60% 100% at 50% 100%,#4a3326,#3a271d 60%,transparent 72%);border-radius:50% 50% 0 0/70% 70% 0 0;}
+  .hand::after{content:"";position:absolute;right:18%;top:-14%;width:26%;height:60%;
+    background:linear-gradient(180deg,#5a3d2d,#3f2a1f);border-radius:40% 40% 28% 28%;transform:rotate(8deg);}
+
+  /* resize handle */
+  .rz{position:absolute;width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--accent);
+    right:-7px;bottom:-7px;cursor:nwse-resize;z-index:5;display:none;}
+  .el.sel .rz{display:block;}
+  .replace{position:absolute;left:0;top:-26px;background:var(--accent);color:#fff;font-size:10.5px;padding:3px 8px;border-radius:6px;display:none;cursor:pointer;white-space:nowrap;}
+  .el.sel .replace{display:block;}
+
+  /* opening */
+  #el-title{left:50%;top:46%;transform:translate(-50%,-50%);width:262px;text-align:center;color:#fff;font-weight:900;
+    font-size:27px;line-height:1.15;-webkit-text-stroke:1.4px #000;text-shadow:0 3px 8px rgba(0,0,0,.6);z-index:4;}
+  #el-countdown{left:50%;top:70%;transform:translate(-50%,-50%);color:#fff;font-weight:900;font-size:72px;
+    -webkit-text-stroke:2px #000;text-shadow:0 4px 14px rgba(0,0,0,.6);z-index:4;}
+
+  /* ===== velvet curtain ===== */
+  .curtain{position:absolute;inset:0;z-index:8;pointer-events:none;}
+  .valance{position:absolute;top:0;left:0;right:0;height:40px;z-index:9;
+    background:repeating-linear-gradient(90deg,rgba(255,255,255,.10) 0,rgba(255,255,255,.02) 9px,rgba(0,0,0,.30) 20px,rgba(0,0,0,.05) 30px,rgba(255,255,255,.10) 40px),
+              linear-gradient(180deg,#ff3d97,#c50f63);
+    box-shadow:0 6px 14px rgba(0,0,0,.5);}
+  .valance::after{content:"";position:absolute;left:0;right:0;bottom:-14px;height:16px;
+    background:radial-gradient(14px 16px at 14px 0,#c50f63 60%,transparent 62%) repeat-x;background-size:34px 16px;}
+  .cpanel{position:absolute;top:-2%;bottom:-2%;width:55%;will-change:transform;
+    background:
+      linear-gradient(90deg,rgba(0,0,0,.45),rgba(0,0,0,0) 8%,rgba(255,255,255,.05) 16%,rgba(0,0,0,0) 26%),
+      repeating-linear-gradient(90deg,rgba(255,255,255,.11) 0,rgba(255,255,255,.02) 10px,rgba(0,0,0,.30) 23px,rgba(0,0,0,.04) 36px,rgba(255,255,255,.11) 46px),
+      linear-gradient(180deg,#ff3d97 0%,#d11069 55%,#940a4e 100%);
+    box-shadow:inset 0 0 55px rgba(0,0,0,.55);}
+  .cpanel.l{left:0;transform-origin:left;border-right:2px solid rgba(0,0,0,.35);}
+  .cpanel.r{right:0;transform-origin:right;border-left:2px solid rgba(0,0,0,.35);}
+  .cpanel::after{content:"";position:absolute;left:0;right:0;bottom:0;height:40px;
+    background:radial-gradient(18px 22px at 18px 0,rgba(0,0,0,.4),transparent 60%) repeat-x;background-size:40px 22px;opacity:.5;}
+
+  .scene{position:absolute;inset:0;display:none;}
+  .scene.show{display:block;}
+  .bg-chip{position:absolute;left:8px;bottom:8px;z-index:6;background:#000000a6;border:1px solid #ffffff22;border-radius:7px;
+    padding:3px 8px;font-size:10px;color:#e9e9f0cc;}
+
+  /* play bar */
+  .playbar{display:flex;align-items:center;gap:12px;width:300px;}
+  .play-btn{width:38px;height:38px;border-radius:50%;background:var(--accent);color:#fff;display:grid;place-items:center;font-size:14px;
+    box-shadow:0 3px 14px rgba(255,45,126,.4);flex:none;}
+  .play-btn:hover{filter:brightness(1.08);}
+  .scrub{flex:1;height:5px;border-radius:6px;background:#2c2c38;position:relative;cursor:pointer;}
+  .scrub > i{position:absolute;left:0;top:0;bottom:0;border-radius:6px;background:linear-gradient(90deg,var(--accent-2),var(--accent));width:0;}
+  .tcode{font-variant-numeric:tabular-nums;color:var(--txt-dim);font-size:11.5px;flex:none;}
+
+  /* ===== right: form ===== */
+  .form{order:1;overflow-y:auto;padding:22px 24px 60px;background:var(--panel);border-right:1px solid var(--line);}
+  .form::-webkit-scrollbar{width:9px;}
+  .form::-webkit-scrollbar-thumb{background:#2e2e3a;border-radius:9px;border:2px solid var(--panel);}
+  .intro{color:var(--txt-faint);font-size:12px;margin:0 0 18px;line-height:1.6;}
+
+  .card{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);padding:18px 18px 6px;margin-bottom:16px;}
+  .card-h{display:flex;align-items:center;gap:9px;margin:-2px 0 16px;}
+  .card-h .n{width:22px;height:22px;border-radius:50%;background:var(--accent);color:#fff;font-size:12px;font-weight:700;display:grid;place-items:center;}
+  .card-h b{font-size:14px;}
+  .card-h small{color:var(--txt-faint);margin-left:auto;font-size:11px;}
+
+  .field{margin-bottom:16px;}
+  .field > label{display:block;font-size:12px;color:var(--txt);margin-bottom:7px;font-weight:600;}
+  .field .hint{color:var(--txt-faint);font-weight:400;font-size:11px;margin-left:6px;}
+  .field input[type=text],.field textarea{width:100%;background:#121218;border:1px solid var(--line);border-radius:10px;color:var(--txt);
+    padding:11px 12px;font-size:13px;outline:none;transition:.12s;}
+  .field textarea{resize:vertical;min-height:96px;line-height:1.5;}
+  .field input:focus,.field textarea:focus{border-color:var(--accent);}
+
+  .upload{display:flex;align-items:center;gap:12px;border:1.5px dashed var(--line);border-radius:11px;padding:13px;background:#121218;transition:.15s;cursor:pointer;}
+  .upload:hover{border-color:var(--accent);}
+  .upload .thumb{width:40px;height:40px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:18px;
+    background:var(--panel-3);overflow:hidden;}
+  .upload .thumb.airport{background:linear-gradient(180deg,#d9c39a,#6f6457 60%,#3c332a);}
+  .upload .info{flex:1;min-width:0;}
+  .upload .info b{display:block;font-size:12.5px;}
+  .upload .info span{display:block;color:var(--ok);font-size:11px;margin-top:2px;}
+  .upload .act{color:var(--txt-faint);font-size:11px;}
+
+  .tabs{display:flex;background:#121218;border:1px solid var(--line);border-radius:10px;padding:3px;gap:3px;margin-bottom:14px;}
+  .tabs button{flex:1;padding:9px;border-radius:8px;font-size:12.5px;color:var(--txt-dim);}
+  .tabs button.on{background:var(--accent);color:#fff;font-weight:600;}
+
+  .slider{display:flex;align-items:center;gap:11px;}
+  .slider input[type=range]{flex:1;accent-color:var(--accent);}
+  .slider .val{width:46px;text-align:right;color:var(--txt-dim);font-size:11.5px;}
+
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;}
+  .toggle-row .tl{font-size:12.5px;}
+  .toggle-row .ts{display:block;color:var(--txt-faint);font-size:11px;margin-top:2px;}
+  .switch{width:40px;height:23px;border-radius:20px;background:var(--panel-3);position:relative;transition:.15s;border:1px solid var(--line);flex:none;}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:#888;transition:.15s;}
+  .switch.on{background:var(--accent);border-color:transparent;}
+  .switch.on::after{left:18px;background:#fff;}
+
+  .auto-note{display:flex;align-items:flex-start;gap:9px;background:#121218;border:1px solid var(--line);border-radius:11px;padding:12px;color:var(--txt-dim);font-size:11.5px;line-height:1.55;}
+  .auto-note .i{color:var(--accent-2);font-size:14px;}
+
+  /* export modal */
+  .modal-back{position:fixed;inset:0;background:#000000aa;backdrop-filter:blur(4px);z-index:100;display:none;align-items:center;justify-content:center;}
+  .modal-back.show{display:flex;}
+  .modal{width:380px;background:var(--panel);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden;}
+  .modal h3{margin:0;padding:16px 18px;border-bottom:1px solid var(--line-soft);font-size:14px;}
+  .modal .body{padding:18px;}
+  .spec{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;}
+  .spec .s{background:var(--panel-2);border:1px solid var(--line);border-radius:7px;padding:6px 10px;font-size:11px;color:var(--txt-dim);}
+  .modal .note2{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--accent-2);border-radius:7px;padding:10px;font-size:11px;color:var(--txt-dim);line-height:1.5;margin-bottom:16px;}
+  .bar{height:8px;border-radius:6px;background:var(--panel-3);overflow:hidden;margin-bottom:8px;}
+  .bar > i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent-2),var(--accent));transition:width .25s;}
+  .modal .stat{color:var(--txt-dim);font-size:12px;margin-bottom:16px;}
+  .modal .actions{display:flex;justify-content:flex-end;gap:9px;}
+  .stage-watermark{position:absolute;right:12px;bottom:12px;color:#ffffff20;font-size:10px;z-index:7;}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand"><div class="logo">🎤</div><div><b>提词秀</b><small>竖屏视频生成器</small></div></div>
+    <span class="proj">· 登机口提词 demo</span>
+    <div class="spacer"></div>
+    <button class="btn" id="btnPreview">▶ 预览</button>
+    <button class="btn primary" id="btnExport">⤓ 导出视频</button>
+  </header>
+
+  <div class="main">
+
+    <!-- preview -->
+    <section class="stage">
+      <div class="peek">
+        <button data-view="opening" class="on">① 开场</button>
+        <button data-view="content">② 正片</button>
+      </div>
+
+      <div class="canvas" id="canvas">
+        <!-- opening -->
+        <div class="scene show" id="scene-opening">
+          <div class="bg-airport"></div>
+          <div class="el" id="el-title">Practice Public Speaking (Like a Gate Agent)</div>
+          <div class="el" id="el-countdown">2</div>
+          <div class="curtain" id="curtain">
+            <div class="cpanel l"></div>
+            <div class="cpanel r"></div>
+            <div class="valance"></div>
+          </div>
+        </div>
+        <!-- content -->
+        <div class="scene" id="scene-content">
+          <div class="bg-airport"></div>
+          <div class="bg-chip">📷 机场登机口.jpg</div>
+
+          <div class="el" id="el-mic" data-name="麦克风">
+            <span class="replace">↻ 替换素材</span><span class="rz"></span>
+            <svg viewBox="0 0 120 150" xmlns="http://www.w3.org/2000/svg">
+              <rect x="86" y="0" width="14" height="22" rx="6" fill="#222"/>
+              <rect x="60" y="14" width="50" height="12" rx="6" fill="#1a1a1a" transform="rotate(28 85 20)"/>
+              <ellipse cx="52" cy="74" rx="34" ry="40" fill="#111"/>
+              <ellipse cx="52" cy="62" rx="30" ry="30" fill="#3a3a3a"/>
+              <ellipse cx="52" cy="62" rx="30" ry="30" fill="url(#grille)"/>
+              <rect x="40" y="100" width="24" height="46" rx="9" fill="#181818"/>
+              <defs><pattern id="grille" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(20)"><circle cx="2" cy="2" r="1.3" fill="#555"/></pattern></defs>
+            </svg>
+          </div>
+
+          <div class="el" id="el-device" data-name="提词设备">
+            <span class="replace">↻ 替换素材</span><span class="rz"></span>
+            <div class="phone">
+              <div class="notch"></div>
+              <div class="screen">
+                <div class="tele-track" id="teleTrack">Good afternoon passengers. We are now ready to begin boarding Skyline Flight 624 to New York JFK.<br><br>At this time, we invite passengers in Group A, as well as those needing special assistance, to make their way to the gate.<br><br>Please have your boarding pass and a valid ID ready for scanning.</div>
+                <div class="tele-video" id="teleVideo"><div class="play">▶</div><small>你上传的视频<br>屏幕区内播放 · 保留原声</small></div>
+              </div>
+              <div class="hand"></div>
+            </div>
+          </div>
+
+          <div class="stage-watermark">无水印 · 内部工具</div>
+        </div>
+      </div>
+
+      <div class="playbar">
+        <button class="play-btn" id="playBtn">▶</button>
+        <div class="scrub" id="scrub"><i id="scrubFill"></i></div>
+        <span class="tcode"><span id="tCur">00:00</span> / 00:36</span>
+      </div>
+    </section>
+
+    <!-- form -->
+    <aside class="form">
+      <p class="intro">填好下面几项就能出片。麦克风和手机的位置 / 大小，直接在左边预览里拖。</p>
+
+      <!-- ① 开场 -->
+      <div class="card">
+        <div class="card-h"><span class="n">1</span><b>开场</b><small>幕布 · 标题 · 倒计时</small></div>
+
+        <div class="field">
+          <label>标题文字</label>
+          <input type="text" id="f-title" value="Practice Public Speaking (Like a Gate Agent)" />
+        </div>
+
+        <div class="toggle-row">
+          <div><span class="tl">3·2·1 倒计时</span><span class="ts">幕布拉开前的入场倒数</span></div>
+          <div class="switch on" data-toggle></div>
+        </div>
+
+        <div class="auto-note" style="margin-bottom:12px;">
+          <span class="i">✨</span>
+          <span>开幕大幕和开场音效已内置（代码自动生成的丝绒拉幕动画），无需上传或配置。</span>
+        </div>
+      </div>
+
+      <!-- ② 正片 -->
+      <div class="card">
+        <div class="card-h"><span class="n">2</span><b>正片</b><small>背景 · 提词 · 配乐</small></div>
+
+        <div class="field">
+          <label>背景图</label>
+          <div class="upload"><div class="thumb airport"></div><div class="info"><b>机场登机口.jpg</b><span>✓ 已上传 · 点击替换</span></div><span class="act">⤴</span></div>
+        </div>
+
+        <div class="field">
+          <label>提词内容</label>
+          <div class="tabs" id="teleTabs">
+            <button data-mode="text" class="on">输入文字</button>
+            <button data-mode="video">上传视频</button>
+          </div>
+
+          <div id="mode-text">
+            <textarea id="f-tele">Good afternoon passengers. We are now ready to begin boarding Skyline Flight 624 to New York JFK.
+
+At this time, we invite passengers in Group A...</textarea>
+            <div class="slider" style="margin-top:12px;">
+              <span style="font-size:11.5px;color:var(--txt-dim);width:64px;">滚动速度</span>
+              <input type="range" min="50" max="200" value="100" id="f-speed">
+              <span class="val" id="f-speed-v">1.0×</span>
+            </div>
+          </div>
+
+          <div id="mode-video" style="display:none;">
+            <div class="upload"><div class="thumb">🎬</div><div class="info"><b>speech-take3.mp4</b><span>✓ 已上传 · 00:31</span></div><span class="act">⤴</span></div>
+            <div class="toggle-row"><div><span class="tl">保留视频原声</span></div><div class="switch on" data-toggle></div></div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>背景音乐 <span class="hint">自动循环铺满全片</span></label>
+          <div class="upload"><div class="thumb">🎵</div><div class="info"><b>ambient-airport.mp3</b><span>✓ 已上传 · 点击替换</span></div><span class="act">⤴</span></div>
+          <div class="slider" style="margin-top:12px;">
+            <span style="font-size:11.5px;color:var(--txt-dim);width:64px;">音量</span>
+            <input type="range" min="0" max="100" value="55" id="f-vol">
+            <span class="val" id="f-vol-v">55</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<!-- export modal -->
+<div class="modal-back" id="modalBack">
+  <div class="modal">
+    <h3>⤓ 导出视频</h3>
+    <div class="body">
+      <div class="spec"><span class="s">MP4 · H.264</span><span class="s">1080×1920</span><span class="s">30 fps</span><span class="s">无水印</span></div>
+      <div class="note2">渲染在云端进行（同一套组件驱动预览与成片），完成后自动下载到本地。</div>
+      <div class="bar"><i id="expBar"></i></div>
+      <div class="stat" id="expStat">正在提交渲染任务…</div>
+      <div class="actions"><button class="btn" id="expCancel">取消</button><button class="btn primary" id="expDone" style="display:none;">下载到本地</button></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var TOTAL=36, OPEN_END=5;
+  var canvas=document.getElementById('canvas');
+  var state={view:'opening',playing:false,t:0,mode:'text',speed:1,sel:null,
+    els:{mic:{x:192,y:0,scale:1},device:{x:70,y:232,scale:1}}};
+
+  /* ---- peek toggle (which scene to look at) ---- */
+  function setView(v){
+    state.view=v;
+    document.getElementById('scene-opening').classList.toggle('show',v==='opening');
+    document.getElementById('scene-content').classList.toggle('show',v==='content');
+    document.querySelectorAll('.peek button').forEach(function(b){b.classList.toggle('on',b.dataset.view===v);});
+  }
+  document.querySelectorAll('.peek button').forEach(function(b){b.addEventListener('click',function(){ if(!state.playing) setView(b.dataset.view); });});
+
+  /* auto-switch preview when editing a field */
+  document.getElementById('f-title').addEventListener('focus',function(){ if(!state.playing) setView('opening'); });
+  ['f-tele','f-speed','f-vol'].forEach(function(id){ var n=document.getElementById(id); if(n) n.addEventListener('focus',function(){ if(!state.playing) setView('content'); }); });
+
+  /* ---- live binds ---- */
+  document.getElementById('f-title').addEventListener('input',function(e){ document.getElementById('el-title').textContent=e.target.value; });
+  document.getElementById('f-tele').addEventListener('input',function(e){ document.getElementById('teleTrack').innerHTML=e.target.value.replace(/\n/g,'<br>'); });
+  document.getElementById('f-speed').addEventListener('input',function(e){ state.speed=e.target.value/100; document.getElementById('f-speed-v').textContent=(e.target.value/100).toFixed(1)+'×'; });
+  document.getElementById('f-vol').addEventListener('input',function(e){ document.getElementById('f-vol-v').textContent=e.target.value; });
+
+  /* ---- mode tabs ---- */
+  document.querySelectorAll('#teleTabs button').forEach(function(b){
+    b.addEventListener('click',function(){
+      state.mode=b.dataset.mode;
+      document.querySelectorAll('#teleTabs button').forEach(function(x){x.classList.toggle('on',x===b);});
+      document.getElementById('mode-text').style.display=state.mode==='text'?'block':'none';
+      document.getElementById('mode-video').style.display=state.mode==='video'?'block':'none';
+      document.getElementById('teleVideo').style.display=state.mode==='video'?'flex':'none';
+      document.getElementById('teleTrack').style.display=state.mode==='video'?'none':'block';
+      if(!state.playing) setView('content');
+    });
+  });
+
+  /* ---- switches ---- */
+  document.querySelectorAll('[data-toggle]').forEach(function(s){ s.addEventListener('click',function(){ s.classList.toggle('on'); }); });
+
+  /* ---- select + drag + resize mic/device ---- */
+  function selectEl(id){
+    state.sel=id;
+    ['el-mic','el-device'].forEach(function(n){ document.getElementById(n).classList.toggle('sel', n==='el-'+id); });
+  }
+  canvas.addEventListener('mousedown',function(e){
+    if(state.view!=='content'||state.playing) return;
+    if(e.target.closest('.replace')) return;
+    var elNode=e.target.closest('#el-mic,#el-device');
+    if(!elNode){ if(!e.target.closest('.el')){ state.sel=null; document.querySelectorAll('.el').forEach(function(n){n.classList.remove('sel');}); } return; }
+    var id=elNode.id==='el-mic'?'mic':'device';
+    selectEl(id);
+    if(e.target.classList.contains('rz')){ startResize(id,elNode,e); } else { startMove(id,elNode,e); }
+  });
+
+  var op=null;
+  function startMove(id,node,e){ op={type:'move',id:id,node:node,sx:e.clientX,sy:e.clientY,ox:state.els[id].x,oy:state.els[id].y}; e.preventDefault(); }
+  function startResize(id,node,e){ op={type:'resize',id:id,node:node,sx:e.clientX,os:state.els[id].scale}; e.preventDefault(); e.stopPropagation(); }
+  window.addEventListener('mousemove',function(e){
+    if(!op) return;
+    var st=state.els[op.id];
+    if(op.type==='move'){
+      st.x=Math.max(-40,Math.min(270,op.ox+(e.clientX-op.sx)));
+      st.y=Math.max(-30,Math.min(500,op.oy+(e.clientY-op.sy)));
+    } else {
+      st.scale=Math.max(0.5,Math.min(2,op.os+(e.clientX-op.sx)/120));
+    }
+    applyEl(op.id);
+  });
+  window.addEventListener('mouseup',function(){ op=null; });
+  function applyEl(id){
+    var n=document.getElementById('el-'+id), st=state.els[id];
+    n.style.left=st.x+'px'; n.style.top=st.y+'px';
+    n.style.transform=(id==='device'?'rotate(-3deg) ':'')+'scale('+st.scale+')';
+  }
+
+  /* ---- playback ---- */
+  var raf=null,last=null;
+  function tick(now){
+    if(!state.playing) return;
+    if(last==null) last=now;
+    state.t+=(now-last)/1000*state.speed; last=now;
+    if(state.t>=TOTAL) state.t=0;
+    applyTime(); raf=requestAnimationFrame(tick);
+  }
+  function ease(p){ return 1-Math.pow(1-p,3); } // easeOutCubic
+  function applyTime(){
+    var t=state.t;
+    document.getElementById('scrubFill').style.width=(t/TOTAL*100)+'%';
+    document.getElementById('tCur').textContent=fmt(t);
+    if(t<OPEN_END){
+      if(state.view!=='opening') setView('opening');
+      var cd=document.getElementById('el-countdown');
+      if(t<3){ cd.style.display='block'; cd.textContent=String(3-Math.floor(t)); } else cd.style.display='none';
+      var p=ease(Math.max(0,Math.min(1,(t-3)/2)));
+      setCurtain(p);
+      document.getElementById('el-title').style.opacity=(t<3?1:1-p);
+    } else {
+      if(state.view!=='content') setView('content');
+      setCurtain(1);
+      if(state.mode==='text'){
+        var tr=document.getElementById('teleTrack');
+        var max=tr.scrollHeight-tr.parentElement.clientHeight+40;
+        tr.style.transform='translateY('+(-Math.max(0,max)*((t-OPEN_END)/(TOTAL-OPEN_END)))+'px)';
+      }
+    }
+  }
+  function setCurtain(p){
+    document.querySelector('#curtain .cpanel.l').style.transform='translateX('+(-104*p)+'%) scaleX('+(1-0.18*p)+')';
+    document.querySelector('#curtain .cpanel.r').style.transform='translateX('+(104*p)+'%) scaleX('+(1-0.18*p)+')';
+  }
+  function fmt(s){ s=Math.floor(s); return '00:'+(s<10?'0':'')+s; }
+  function play(){ state.playing=true; last=null; document.getElementById('playBtn').textContent='⏸'; document.querySelectorAll('.el').forEach(function(n){n.classList.remove('sel');}); raf=requestAnimationFrame(tick); }
+  function pause(){ state.playing=false; if(raf) cancelAnimationFrame(raf); document.getElementById('playBtn').textContent='▶'; }
+  document.getElementById('playBtn').addEventListener('click',function(){ state.playing?pause():play(); });
+  document.getElementById('btnPreview').addEventListener('click',function(){ if(!state.playing){ state.t=0; play(); } });
+  document.getElementById('scrub').addEventListener('click',function(e){
+    var r=this.getBoundingClientRect(); state.t=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))*TOTAL; if(!state.playing) applyTime();
+  });
+
+  /* ---- static editing pose ---- */
+  function staticPose(){ setCurtain(0.12); document.getElementById('el-countdown').style.display='block'; document.getElementById('el-countdown').textContent='2'; document.getElementById('el-title').style.opacity=1; document.getElementById('teleTrack').style.transform='translateY(-110px)'; }
+
+  /* ---- export ---- */
+  var expTimer=null;
+  document.getElementById('btnExport').addEventListener('click',function(){
+    document.getElementById('modalBack').classList.add('show');
+    var bar=document.getElementById('expBar'),stat=document.getElementById('expStat'),done=document.getElementById('expDone');
+    bar.style.width='0%'; done.style.display='none';
+    var steps=[[10,'已提交渲染任务，排队中…'],[34,'云端合成图层…'],[66,'合成音轨 · 编码 H.264…'],[90,'封装 MP4…'],[100,'渲染完成 ✓']];
+    var i=0; clearInterval(expTimer);
+    expTimer=setInterval(function(){ if(i>=steps.length){ clearInterval(expTimer); stat.textContent='渲染完成，可下载到本地。'; done.style.display='inline-flex'; return; } bar.style.width=steps[i][0]+'%'; stat.textContent=steps[i][1]; i++; },650);
+  });
+  document.getElementById('expCancel').addEventListener('click',function(){ clearInterval(expTimer); document.getElementById('modalBack').classList.remove('show'); });
+  document.getElementById('expDone').addEventListener('click',function(){ document.getElementById('modalBack').classList.remove('show'); });
+
+  /* init */
+  applyEl('mic'); applyEl('device'); staticPose(); setView('opening');
+})();
+</script>
+</body>
+</html>
