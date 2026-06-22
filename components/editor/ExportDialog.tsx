@@ -130,6 +130,7 @@ export function ExportDialog() {
           </div>
           {phase === "done" && url ? (
             <Button
+              nativeButton={false}
               render={<a href={url} download />}
               className="w-full bg-[#ff2d7e] text-white hover:bg-[#ff2d7e]/90"
             >
