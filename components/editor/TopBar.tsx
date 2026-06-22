@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { RotateCcw, FileUp, FileDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ExportDialog } from "./ExportDialog";
+import { Logo } from "./Logo";
 import { useEditor } from "@/lib/store";
 
 export function TopBar() {
@@ -25,9 +26,7 @@ export function TopBar() {
   return (
     <header className="flex h-14 flex-none items-center gap-3 border-b border-border bg-gradient-to-b from-[#17171e] to-[#121218] px-4">
       <div className="flex items-center gap-2.5">
-        <div className="grid size-8 place-items-center rounded-lg bg-gradient-to-br from-[#ff5ba0] to-[#ff2d7e] text-base shadow-lg shadow-[#ff2d7e]/40">
-          🎤
-        </div>
+        <Logo className="size-8 rounded-lg shadow-lg shadow-[#ff2d7e]/40" />
         <span className="text-sm font-semibold leading-none">小音符起号助手</span>
       </div>
 
