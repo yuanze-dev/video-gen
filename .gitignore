@@ -25,8 +25,14 @@
 # electron-builder output
 /release/
 
-# production
-/build
+# production (CRA leftover — Next uses .next/). build/ holds electron-builder
+# release resources (signing/notarize/icon/dmg), which MUST stay tracked.
+/build/*
+!/build/entitlements.mac.plist
+!/build/notarize.cjs
+!/build/icon.icns
+!/build/dmg-bg.png
+!/build/dmg-bg@2x.png
 
 # misc
 .DS_Store

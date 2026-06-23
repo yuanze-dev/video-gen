@@ -6,27 +6,61 @@ directories:
   output: release
   buildResources: build
 
-# The editor UI is loaded remotely (Vercel), so the app only needs the Electron
-# main/preload bundles plus @remotion/renderer and its native compositor. Strip
-# the build-time-only and UI-only heavyweights that never run on the desktop.
+# The editor UI + Remotion composition load from Vercel at runtime, so the desktop
+# app only needs electron/dist + @remotion/renderer's runtime closure (verified:
+# execa, remotion, @remotion/{streaming,licensing,compositor-darwin-arm64}, react,
+# react-dom, source-map, ws + small deps). Everything below is provably outside
+# that closure (project source, UI libs, build tooling), so it's stripped.
 files:
   - "**/*"
   - "!**/*.map"
-  - "!.next${/*}"
-  - "!public/remotion-site${/*}"
-  - "!.remotion-build${/*}"
-  - "!release${/*}"
   - "!**/*.ts"
   - "!**/*.tsx"
+  # project source — not imported at runtime (resolveConfig is bundled into main.cjs)
+  - "!app${/*}"
+  - "!components${/*}"
+  - "!lib${/*}"
+  - "!remotion${/*}"
+  - "!scripts${/*}"
+  - "!public${/*}"
+  - "!.next${/*}"
+  - "!.remotion-build${/*}"
+  - "!.vercel${/*}"
+  - "!release${/*}"
+  # UI / build-only production deps (NOT in @remotion/renderer's runtime closure)
   - "!node_modules/next${/*}"
-  - "!node_modules/@remotion/bundler${/*}"
-  - "!node_modules/@remotion/studio${/*}"
   - "!node_modules/@next${/*}"
+  - "!node_modules/@rspack${/*}"
+  - "!node_modules/@swc${/*}"
   - "!node_modules/webpack${/*}"
+  - "!node_modules/@babel${/*}"
+  - "!node_modules/three${/*}"
+  - "!node_modules/@react-three${/*}"
+  - "!node_modules/lucide-react${/*}"
+  - "!node_modules/@base-ui${/*}"
+  - "!node_modules/@img${/*}"
+  - "!node_modules/sharp${/*}"
+  - "!node_modules/@ts-morph${/*}"
+  - "!node_modules/ts-morph${/*}"
   - "!node_modules/typescript${/*}"
+  - "!node_modules/tailwindcss${/*}"
+  - "!node_modules/@tailwindcss${/*}"
+  - "!node_modules/tw-animate-css${/*}"
+  - "!node_modules/shadcn${/*}"
+  - "!node_modules/zod${/*}"
+  - "!node_modules/@remotion/bundler${/*}"
+  - "!node_modules/@remotion/player${/*}"
+  - "!node_modules/@remotion/studio${/*}"
+  - "!node_modules/@remotion/studio-shared${/*}"
+  - "!node_modules/@remotion/web-renderer${/*}"
+  - "!node_modules/@remotion/canvas-capture${/*}"
+  - "!node_modules/@remotion/media-utils${/*}"
+  - "!node_modules/@remotion/timeline-utils${/*}"
+  - "!node_modules/@remotion/zod-types${/*}"
+  - "!node_modules/caniuse-lite${/*}"
   - "!node_modules/electron${/*}"
   - "!node_modules/electron-builder${/*}"
-  - "!node_modules/esbuild${/*}"
+  - "!node_modules/app-builder-lib${/*}"
   - "!node_modules/.cache${/*}"
 
 # chrome-headless-shell can't live inside the read-only asar; ship it alongside.
@@ -42,12 +76,40 @@ asarUnpack:
 
 npmRebuild: false
 
+# Notarize + staple after signing when notarization credentials are present in
+# the env (NOTARY_PROFILE / APPLE_API_* / APPLE_ID+APPLE_APP_SPECIFIC_PASSWORD+
+# APPLE_TEAM_ID). Without credentials this hook is a no-op (signed-only build).
+afterSign: build/notarize.cjs
+
 mac:
   category: public.app-category.video
+  icon: build/icon.icns
   target:
     - target: dmg
       arch:
         - arm64
-  # First pass is an UNSIGNED dev build. For team distribution, supply an Apple
-  # Developer ID and enable notarization (see plan: signing is a prerequisite).
-  identity: null
+  # Signed with the local "Developer ID Application: Beijing Principle
+  # Technology Co., Ltd. (666P8DEX39)" cert (auto-discovered from the keychain).
+  # Hardened runtime + entitlements are required for notarization and for the
+  # bundled chrome-headless-shell / compositor to run.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
+# Drag-to-install window: branded background, app icon on the left, an arrow,
+# and the /Applications alias on the right.
+dmg:
+  background: build/dmg-bg.png
+  iconSize: 110
+  window:
+    width: 540
+    height: 380
+  contents:
+    - x: 150
+      y: 218
+      type: file
+    - x: 390
+      y: 218
+      type: link
+      path: /Applications
