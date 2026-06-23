@@ -128,3 +128,14 @@
     @apply font-sans;
   }
 }
+
+@layer utilities {
+  /* Desktop (Electron) frameless window: let the top bar drag the window while
+     keeping interactive controls clickable. No-ops in a plain browser. */
+  .drag-region {
+    -webkit-app-region: drag;
+  }
+  .no-drag-region {
+    -webkit-app-region: no-drag;
+  }
+}
