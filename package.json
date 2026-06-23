@@ -1,6 +1,6 @@
 {
   "name": "video-gen",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "小音符起号助手 — 提词器视频生成器（本机渲染桌面版）",
   "author": "原则科技 Yuanze",
@@ -25,6 +25,7 @@
     "@types/three": "^0.184.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "electron-updater": "^6.8.9",
     "lucide-react": "^1.21.0",
     "next": "16.2.9",
     "next-themes": "^0.4.6",

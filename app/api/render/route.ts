@@ -17,6 +17,17 @@ export async function POST(req: NextRequest) {
     return new NextResponse("invalid config json", { status: 400 });
   }
 
+  // Optional export options (画质/清晰度/流畅度); absent → previous fixed output.
+  let optsJson: unknown;
+  const optsStr = form.get("options");
+  if (typeof optsStr === "string") {
+    try {
+      optsJson = JSON.parse(optsStr);
+    } catch {
+      return new NextResponse("invalid options json", { status: 400 });
+    }
+  }
+
   const job = await createJob();
   for (const [key, val] of form.entries()) {
     if (key.startsWith("asset:") && val instanceof File) {
@@ -25,7 +36,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Render asynchronously; the client polls the status endpoint.
-  void startRender(job, cfgJson, req.nextUrl.origin);
+  void startRender(job, cfgJson, req.nextUrl.origin, optsJson);
 
   return NextResponse.json({ jobId: job.id });
 }

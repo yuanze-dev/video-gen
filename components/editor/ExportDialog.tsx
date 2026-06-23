@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useEditor } from "@/lib/store";
 import type { ProjectConfig } from "@/lib/config-schema";
+import { DEFAULT_EXPORT_OPTIONS, type ExportOptions } from "@/lib/export-options";
+import { ExportOptionsForm } from "./ExportOptions";
 
 type Phase = "idle" | "working" | "done" | "error" | "unsupported";
 
@@ -14,10 +16,12 @@ type Phase = "idle" | "working" | "done" | "error" | "unsupported";
 type RenderAsset = { id: string; name: string; mime: string; data: ArrayBuffer };
 type ElectronRender = {
   isAvailable: boolean;
+  supportsExportOptions?: boolean; // absent on shells older than the export-options release
   render: (p: {
     serveUrl: string;
     config: unknown;
     assets: RenderAsset[];
+    options: ExportOptions;
   }) => Promise<{ ok: true; jobId: string } | { ok: false; error: string }>;
   onProgress: (cb: (progress: number) => void) => () => void;
   save: (
@@ -71,6 +75,10 @@ async function collectAssets(
 export function ExportDialog() {
   const [open, setOpen] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
+  const [options, setOptions] = useState<ExportOptions>(DEFAULT_EXPORT_OPTIONS);
+  // Whether the installed desktop shell honors export options (older shells don't);
+  // captured when the dialog opens so we never read `window` during render.
+  const [canPickOptions, setCanPickOptions] = useState(true);
   const [progress, setProgress] = useState(0);
   const [stat, setStat] = useState("准备渲染任务…");
   const [jobId, setJobId] = useState<string | null>(null);
@@ -91,7 +99,7 @@ export function ExportDialog() {
   };
   useEffect(() => () => cleanup(), []);
 
-  const start = async () => {
+  const start = async (opts: ExportOptions) => {
     const bridge = window.electronRender;
     if (!bridge?.isAvailable) {
       setPhase("unsupported");
@@ -116,7 +124,7 @@ export function ExportDialog() {
         setStat("本机合成图层 · 编码 H.264…");
       });
 
-      const res = await bridge.render({ serveUrl, config, assets });
+      const res = await bridge.render({ serveUrl, config, assets, options: opts });
       cleanup();
       if (!res.ok) {
         setStat(res.error || "渲染失败");
@@ -146,8 +154,11 @@ export function ExportDialog() {
     <>
       <Button
         onClick={() => {
+          // Open to the options step; the user picks settings then hits 开始导出.
+          const bridge = window.electronRender;
+          setPhase(bridge?.isAvailable ? "idle" : "unsupported");
+          setCanPickOptions(!!bridge?.supportsExportOptions);
           setOpen(true);
-          void start();
         }}
         className="bg-[#ff2d7e] text-white hover:bg-[#ff2d7e]/90"
       >
@@ -169,17 +180,6 @@ export function ExportDialog() {
             <DialogTitle>导出视频</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <div className="flex flex-wrap gap-2">
-              {["MP4 · H.264", "1080×1920", "30 fps", "无水印"].map((s) => (
-                <span
-                  key={s}
-                  className="rounded-md border border-border bg-muted px-2.5 py-1 text-[11px] text-muted-foreground"
-                >
-                  {s}
-                </span>
-              ))}
-            </div>
-
             {phase === "unsupported" ? (
               <div className="space-y-3">
                 <p className="rounded-lg border border-border border-l-2 border-l-[#ff2d7e] bg-muted/40 p-3 text-[13px] leading-relaxed text-muted-foreground">
@@ -193,41 +193,58 @@ export function ExportDialog() {
                 <p className="rounded-lg border border-border border-l-2 border-l-[#7c5cff] bg-muted/40 p-3 text-[11px] leading-relaxed text-muted-foreground">
                   首次导出需要准备渲染环境，会稍慢一些，请耐心等待。渲染在本机进行，不会上传你的素材。
                 </p>
-                <Progress value={progress} />
-                <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
-                  {phase === "working" ? <Loader2 className="size-4 animate-spin" /> : null}
-                  {phase === "done" ? <Check className="size-4 text-emerald-500" /> : null}
-                  {stat}
-                </div>
 
-                {phase === "done" && jobId ? (
-                  <div className="space-y-2">
+                {phase === "idle" ? (
+                  <>
+                    {canPickOptions ? (
+                      <ExportOptionsForm value={options} onChange={setOptions} />
+                    ) : null}
                     <Button
-                      onClick={() => void save("video")}
+                      onClick={() => void start(options)}
                       className="w-full bg-[#ff2d7e] text-white hover:bg-[#ff2d7e]/90"
                     >
-                      <Download className="size-4" /> 保存视频
+                      <Download className="size-4" /> 开始导出
                     </Button>
-                    <Button variant="outline" className="w-full" onClick={() => void save("cover")}>
-                      <ImageIcon className="size-4" /> 保存封面图（第一帧）
-                    </Button>
-                    {savedPath ? (
-                      <button
-                        type="button"
-                        onClick={() => void window.electronRender?.reveal(savedPath)}
-                        className="flex w-full items-center justify-center gap-1.5 text-[12px] text-muted-foreground hover:text-foreground"
-                      >
-                        <FolderOpen className="size-3.5" /> 已保存，在访达中显示
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
+                  </>
+                ) : (
+                  <>
+                    <Progress value={progress} />
+                    <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
+                      {phase === "working" ? <Loader2 className="size-4 animate-spin" /> : null}
+                      {phase === "done" ? <Check className="size-4 text-emerald-500" /> : null}
+                      {stat}
+                    </div>
 
-                {phase === "error" ? (
-                  <Button variant="outline" className="w-full" onClick={() => void start()}>
-                    重试
-                  </Button>
-                ) : null}
+                    {phase === "done" && jobId ? (
+                      <div className="space-y-2">
+                        <Button
+                          onClick={() => void save("video")}
+                          className="w-full bg-[#ff2d7e] text-white hover:bg-[#ff2d7e]/90"
+                        >
+                          <Download className="size-4" /> 保存视频
+                        </Button>
+                        <Button variant="outline" className="w-full" onClick={() => void save("cover")}>
+                          <ImageIcon className="size-4" /> 保存封面图（第一帧）
+                        </Button>
+                        {savedPath ? (
+                          <button
+                            type="button"
+                            onClick={() => void window.electronRender?.reveal(savedPath)}
+                            className="flex w-full items-center justify-center gap-1.5 text-[12px] text-muted-foreground hover:text-foreground"
+                          >
+                            <FolderOpen className="size-3.5" /> 已保存，在访达中显示
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    {phase === "error" ? (
+                      <Button variant="outline" className="w-full" onClick={() => void start(options)}>
+                        重试
+                      </Button>
+                    ) : null}
+                  </>
+                )}
               </>
             )}
           </div>

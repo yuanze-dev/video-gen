@@ -9,6 +9,7 @@ import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } from "electro
 import path from "node:path";
 import fs from "node:fs/promises";
 import { startRender, cancelRender, getJob, cleanupJob, type RenderRequest } from "./render";
+import { initAutoUpdate } from "./updater";
 
 // In the packaged app, node_modules lives inside app.asar (read-only, can't
 // execute binaries) and the chromium download dir isn't writable. Point Remotion
@@ -175,6 +176,8 @@ app.whenReady().then(() => {
   // context menus, the save dialog) to match so nothing flashes light.
   nativeTheme.themeSource = "dark";
   createWindow();
+  // Keep the desktop shell current: background download + idle restart prompt.
+  initAutoUpdate(() => mainWindow);
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
