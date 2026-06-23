@@ -3,6 +3,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { ProjectConfig } from "../config-schema";
 import { resolveConfig } from "../resolved";
+import { crfFor, normalizeExportOptions, scaleFor } from "../export-options";
 
 export type JobStatus = "queued" | "rendering" | "done" | "error";
 
@@ -52,7 +53,7 @@ export async function saveAsset(job: Job, assetId: string, file: File) {
   job.assets[assetId] = { file: fp, mime: file.type || "application/octet-stream" };
 }
 
-export async function startRender(job: Job, cfgJson: unknown, origin: string) {
+export async function startRender(job: Job, cfgJson: unknown, origin: string, optsJson?: unknown) {
   const parsed = ProjectConfig.safeParse(cfgJson);
   if (!parsed.success) {
     job.status = "error";
@@ -65,8 +66,16 @@ export async function startRender(job: Job, cfgJson: unknown, origin: string) {
   for (const id of Object.keys(job.assets)) {
     urls[id] = `${origin}/api/asset/${job.id}/${id}`;
   }
-  const resolved = resolveConfig(parsed.data, urls);
+  // Export options (画质/清晰度/流畅度). fps rides in the config so the
+  // composition's duration matches; crf/scale are encoder-only. Defaults
+  // reproduce the previous fixed output.
+  const opts = normalizeExportOptions(optsJson);
+  const resolved = {
+    ...resolveConfig(parsed.data, urls),
+    canvas: { ...parsed.data.canvas, fps: opts.fps },
+  };
   const inputProps = { config: resolved };
+  const scale = scaleFor(opts.resolution);
 
   job.status = "rendering";
   try {
@@ -81,6 +90,8 @@ export async function startRender(job: Job, cfgJson: unknown, origin: string) {
       serveUrl,
       composition,
       codec: "h264",
+      crf: crfFor(opts.quality),
+      scale,
       outputLocation: outputPath,
       inputProps,
       chromiumOptions: { gl: "angle" },
@@ -100,6 +111,7 @@ export async function startRender(job: Job, cfgJson: unknown, origin: string) {
       inputProps,
       imageFormat: "jpeg",
       jpegQuality: 90,
+      scale,
       chromiumOptions: { gl: "angle" },
     });
     job.coverPath = coverPath;

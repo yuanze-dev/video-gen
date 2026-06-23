@@ -13,6 +13,7 @@ import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { ProjectConfig } from "../lib/config-schema";
 import { resolveConfig } from "../lib/resolved";
+import { crfFor, normalizeExportOptions, scaleFor } from "../lib/export-options";
 
 export type IncomingAsset = {
   id: string;
@@ -25,6 +26,7 @@ export type RenderRequest = {
   serveUrl: string;
   config: unknown;
   assets: IncomingAsset[];
+  options?: unknown;
 };
 
 export type RenderResult = {
@@ -41,10 +43,21 @@ type Job = {
   outputPath?: string;
   coverPath?: string;
   cancel?: () => void;
+  active?: boolean; // true for the whole render (incl. browser launch), cleared in finally
 };
 
 const jobs = new Map<string, Job>();
 export const getJob = (id: string): Job | undefined => jobs.get(id);
+
+// True while any job is doing work — from the moment it enters the map through
+// asset write, browser launch, encode and cover, cleared in a finally on success
+// OR failure. The auto-updater checks this so a restart-to-update never kills an
+// in-progress export. (Keyed on an explicit flag, not `cancel`, which is only set
+// during the encode phase and would otherwise miss setup and leak on errors.)
+export const isRendering = (): boolean => {
+  for (const job of jobs.values()) if (job.active) return true;
+  return false;
+};
 
 // ---- localhost asset server (lazy, shared across renders) -------------------
 
@@ -112,86 +125,103 @@ export async function startRender(
   const id = crypto.randomUUID();
   const dir = path.join(os.tmpdir(), "teleprompter-render", id);
   await fs.mkdir(dir, { recursive: true });
-  const job: Job = { id, dir, assets: {} };
+  const job: Job = { id, dir, assets: {}, active: true };
   jobs.set(id, job);
 
-  // Persist incoming assets to disk so the localhost server can stream them.
-  // The id arrives over IPC from the page; reject anything that could escape
-  // the job dir before using it as a path segment (defense-in-depth).
-  for (const a of req.assets ?? []) {
-    if (!/^[A-Za-z0-9_.-]{1,128}$/.test(a.id) || a.id.includes("..")) {
-      throw new Error(`非法 asset id: ${a.id}`);
+  try {
+    // Persist incoming assets to disk so the localhost server can stream them.
+    // The id arrives over IPC from the page; reject anything that could escape
+    // the job dir before using it as a path segment (defense-in-depth).
+    for (const a of req.assets ?? []) {
+      if (!/^[A-Za-z0-9_.-]{1,128}$/.test(a.id) || a.id.includes("..")) {
+        throw new Error(`非法 asset id: ${a.id}`);
+      }
+      const fp = path.join(dir, a.id);
+      await fs.writeFile(fp, Buffer.from(a.data));
+      job.assets[a.id] = { file: fp, mime: a.mime || "application/octet-stream" };
     }
-    const fp = path.join(dir, a.id);
-    await fs.writeFile(fp, Buffer.from(a.data));
-    job.assets[a.id] = { file: fp, mime: a.mime || "application/octet-stream" };
+
+    const port = await ensureAssetServer();
+    const urls: Record<string, string> = {};
+    for (const assetId of Object.keys(job.assets)) {
+      urls[assetId] = `http://127.0.0.1:${port}/asset/${id}/${encodeURIComponent(assetId)}`;
+    }
+
+    // Export options (画质/清晰度/流畅度) chosen in the dialog. fps rides in the
+    // config so calculateMetadata derives a matching durationInFrames; crf/scale
+    // are encoder-only and passed straight to renderMedia/renderStill.
+    const opts = normalizeExportOptions(req.options);
+    const resolved = {
+      ...resolveConfig(parsed.data, urls),
+      canvas: { ...parsed.data.canvas, fps: opts.fps },
+    };
+    const inputProps = { config: resolved };
+    const scale = scaleFor(opts.resolution);
+
+    const { ensureBrowser, selectComposition, renderMedia, renderStill, makeCancelSignal } =
+      await import("@remotion/renderer");
+
+    // Optional overrides for the packaged app (read-only bundled binaries). Only
+    // include keys when actually set so we never pass null into Remotion.
+    const browserExecutable = process.env.REMOTION_BROWSER_EXECUTABLE || undefined;
+    const binariesDirectory = process.env.REMOTION_BINARIES_DIR || undefined;
+    const common: {
+      browserExecutable?: string;
+      binariesDirectory?: string;
+      chromiumOptions: { gl: "angle" };
+    } = { chromiumOptions: { gl: "angle" } };
+    if (browserExecutable) common.browserExecutable = browserExecutable;
+    if (binariesDirectory) common.binariesDirectory = binariesDirectory;
+
+    await ensureBrowser(browserExecutable ? { browserExecutable } : undefined);
+
+    const composition = await selectComposition({
+      serveUrl: req.serveUrl,
+      id: "Teleprompter",
+      inputProps,
+      ...common,
+    });
+
+    const { cancelSignal, cancel } = makeCancelSignal();
+    job.cancel = cancel;
+
+    const outputPath = path.join(dir, "out.mp4");
+    await renderMedia({
+      serveUrl: req.serveUrl,
+      composition,
+      codec: "h264",
+      crf: crfFor(opts.quality),
+      scale,
+      outputLocation: outputPath,
+      inputProps,
+      cancelSignal,
+      onProgress: ({ progress }: { progress: number }) => onProgress(progress),
+      ...common,
+    });
+    job.outputPath = outputPath;
+
+    // Cover = first frame (closed curtain), matches the web pipeline.
+    const coverPath = path.join(dir, "cover.jpg");
+    await renderStill({
+      serveUrl: req.serveUrl,
+      composition,
+      frame: 0,
+      output: coverPath,
+      inputProps,
+      imageFormat: "jpeg",
+      jpegQuality: 90,
+      scale,
+      ...common,
+    });
+    job.coverPath = coverPath;
+    job.cancel = undefined;
+
+    return { jobId: id, outputPath, coverPath };
+  } finally {
+    // Mark the job idle whether it finished or threw, so a failed render never
+    // leaves the auto-updater thinking an export is still running.
+    job.active = false;
   }
-
-  const port = await ensureAssetServer();
-  const urls: Record<string, string> = {};
-  for (const assetId of Object.keys(job.assets)) {
-    urls[assetId] = `http://127.0.0.1:${port}/asset/${id}/${encodeURIComponent(assetId)}`;
-  }
-
-  const resolved = resolveConfig(parsed.data, urls);
-  const inputProps = { config: resolved };
-
-  const { ensureBrowser, selectComposition, renderMedia, renderStill, makeCancelSignal } =
-    await import("@remotion/renderer");
-
-  // Optional overrides for the packaged app (read-only bundled binaries). Only
-  // include keys when actually set so we never pass null into Remotion.
-  const browserExecutable = process.env.REMOTION_BROWSER_EXECUTABLE || undefined;
-  const binariesDirectory = process.env.REMOTION_BINARIES_DIR || undefined;
-  const common: {
-    browserExecutable?: string;
-    binariesDirectory?: string;
-    chromiumOptions: { gl: "angle" };
-  } = { chromiumOptions: { gl: "angle" } };
-  if (browserExecutable) common.browserExecutable = browserExecutable;
-  if (binariesDirectory) common.binariesDirectory = binariesDirectory;
-
-  await ensureBrowser(browserExecutable ? { browserExecutable } : undefined);
-
-  const composition = await selectComposition({
-    serveUrl: req.serveUrl,
-    id: "Teleprompter",
-    inputProps,
-    ...common,
-  });
-
-  const { cancelSignal, cancel } = makeCancelSignal();
-  job.cancel = cancel;
-
-  const outputPath = path.join(dir, "out.mp4");
-  await renderMedia({
-    serveUrl: req.serveUrl,
-    composition,
-    codec: "h264",
-    outputLocation: outputPath,
-    inputProps,
-    cancelSignal,
-    onProgress: ({ progress }: { progress: number }) => onProgress(progress),
-    ...common,
-  });
-  job.outputPath = outputPath;
-
-  // Cover = first frame (closed curtain), matches the web pipeline.
-  const coverPath = path.join(dir, "cover.jpg");
-  await renderStill({
-    serveUrl: req.serveUrl,
-    composition,
-    frame: 0,
-    output: coverPath,
-    inputProps,
-    imageFormat: "jpeg",
-    jpegQuality: 90,
-    ...common,
-  });
-  job.coverPath = coverPath;
-  job.cancel = undefined;
-
-  return { jobId: id, outputPath, coverPath };
 }
 
 export function cancelRender(jobId: string): void {

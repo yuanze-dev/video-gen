@@ -22,7 +22,11 @@ await build({
   sourcemap: true,
   // Native / runtime-resolved packages stay in node_modules and are required
   // (or dynamically imported) at runtime, not inlined into the bundle.
-  external: ["electron", "@remotion/renderer"],
+  // electron-updater is kept external too: it reads app-update.yml from the
+  // packaged resources at runtime and pulls in builder-util-runtime; bundling it
+  // is fragile, so resolve it from node_modules (it's a production dep, so
+  // electron-builder packs it into the asar).
+  external: ["electron", "@remotion/renderer", "electron-updater"],
   logLevel: "info",
 });
 

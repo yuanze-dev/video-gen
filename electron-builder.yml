@@ -2,6 +2,17 @@ appId: com.yuanze.video-gen
 productName: 小音符起号助手
 copyright: © 原则科技 Yuanze
 
+# Auto-update feed. The repo is PUBLIC, so the shipped client reads releases with
+# no token. CI publishes dmg + zip + latest-mac.yml + blockmap to this repo's
+# Releases on each v* tag using the default GITHUB_TOKEN; electron-updater polls
+# latest-mac.yml from it. This block is also baked into app-update.yml inside the
+# packaged app, which is how the runtime updater finds the feed.
+publish:
+  - provider: github
+    owner: yuanze-dev
+    repo: video-gen
+    releaseType: release # publish immediately (not draft) so clients see updates
+
 directories:
   output: release
   buildResources: build
@@ -85,7 +96,10 @@ mac:
   category: public.app-category.video
   icon: build/icon.icns
   target:
-    - target: dmg
+    - target: dmg # first-install download (drag-to-Applications)
+      arch:
+        - arm64
+    - target: zip # REQUIRED for Squirrel.Mac auto-update; also yields latest-mac.yml
       arch:
         - arm64
   # Signed with the local "Developer ID Application: Beijing Principle

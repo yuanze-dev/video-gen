@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # create/upload the GitHub Release
+  contents: write # create/upload the GitHub Release (auto-update feed) in this repo
 
 jobs:
   build-mac:
@@ -54,41 +54,22 @@ jobs:
           npm run build:remotion-site
           npm run build:electron
 
-      # Sign with the Developer ID cert (CSC_LINK = base64 of the .p12).
-      # --publish never: we publish explicitly below (and notarize the dmg first).
-      # APPLE_* are intentionally NOT exposed here, so the afterSign notarize hook
-      # stays a no-op and we notarize the dmg explicitly in the next step.
-      - name: Build & sign (Developer ID)
+      # One step does it all now that auto-update is in play:
+      #   • CSC_*  → sign the .app with the Developer ID cert (CSC_LINK = base64 .p12)
+      #   • APPLE_* → afterSign hook (build/notarize.cjs) notarizes AND staples the
+      #     .app, so BOTH the dmg and the auto-update zip ship a stapled, notarized
+      #     app (a dmg-only notarize would leave the zip's app unstapled → updates
+      #     download but Gatekeeper rejects them).
+      #   • GH_TOKEN → --publish always uploads dmg + zip + latest-mac.yml +
+      #     blockmap to this repo's Releases (see the publish: block in
+      #     electron-builder.yml). The repo is public, so clients read the feed
+      #     with no token; the default GITHUB_TOKEN has enough scope to publish.
+      - name: Build, sign, notarize & publish
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-        run: npx electron-builder --mac --publish never
-
-      - name: Notarize + staple dmg
-        env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          DMG="$(ls release/*.dmg | head -1)"
-          echo "Notarizing: $DMG"
-          xcrun notarytool submit "$DMG" \
-            --apple-id "$APPLE_ID" \
-            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-            --team-id "$APPLE_TEAM_ID" \
-            --wait
-          xcrun stapler staple "$DMG"
-          xcrun stapler validate "$DMG"
-
-      - name: Publish to GitHub Release
-        env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="v$(node -p "require('./package.json').version")"
-          DMG="$(ls release/*.dmg | head -1)"
-          echo "Publishing $DMG to release $VERSION"
-          gh release create "$VERSION" "$DMG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "小音符起号助手 $VERSION" \
-            --notes "macOS (Apple Silicon) build — Developer ID signed + Apple notarized. Double-click → drag to Applications → open." \
-          || gh release upload "$VERSION" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
+        run: npx electron-builder --mac --publish always

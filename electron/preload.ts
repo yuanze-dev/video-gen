@@ -2,6 +2,7 @@
 // The editor (loaded from Vercel) detects `window.electronRender` and routes
 // MP4 export through it; in a plain browser the object is absent.
 import { contextBridge, ipcRenderer } from "electron";
+import type { ExportOptions } from "../lib/export-options";
 
 export type BridgeAsset = {
   id: string;
@@ -14,10 +15,16 @@ export type RenderPayload = {
   serveUrl: string;
   config: unknown;
   assets: BridgeAsset[];
+  options?: ExportOptions;
 };
 
 const electronRender = {
   isAvailable: true as const,
+  // Advertises that this shell's render engine honors the `options` payload
+  // (画质/清晰度/流畅度). A freshly deployed web UI checks this so it can hide the
+  // option picker from an OLDER installed shell that would silently ignore it,
+  // instead of offering controls that do nothing until the user auto-updates.
+  supportsExportOptions: true as const,
 
   render: (payload: RenderPayload): Promise<{ ok: true; jobId: string } | { ok: false; error: string }> =>
     ipcRenderer.invoke("render:start", payload),
