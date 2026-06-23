@@ -52,6 +52,7 @@ export const ProjectConfig = z.object({
       enabled: z.boolean().default(true),
       from: z.number().int().min(1).max(10).default(3),
       speed: z.number().min(0.5).max(3).default(2), // ticks/sec multiplier
+      fontSize: z.number().default(170), // canvas px
       pos: Point.default({ x: 0.5, y: 0.72 }),
     }),
     curtain: z.object({
@@ -91,11 +92,8 @@ export const ProjectConfig = z.object({
 
 export type ProjectConfig = z.infer<typeof ProjectConfig>;
 
-const DEFAULT_TELEPROMPTER_TEXT = `Good afternoon passengers. We are now ready to begin boarding Skyline Flight 624 to New York JFK.
-
-At this time, we invite passengers in Group A, as well as those needing special assistance, to make their way to the gate.
-
-Please have your boarding pass and a valid ID ready for scanning. Thank you for flying with us today.`;
+const DEFAULT_TELEPROMPTER_TEXT =
+  "\n\n\n\nGood afternoon, ladies and gentlemen. This is the pre-boarding announcement for American Airlines Flight 1287 with service to Dallas/Fort Worth.\nWe are now inviting those passengers with small children, and any passengers requiring special assistance, to begin boarding at this time. Please have your boarding pass and a valid form of identification ready.\nWe would also like to welcome our AAdvantage® Executive Platinum and ConciergeKey® members to board at this time.";
 
 export function makeDefaultConfig(): ProjectConfig {
   return {
@@ -107,9 +105,9 @@ export function makeDefaultConfig(): ProjectConfig {
         fontSize: 92,
         color: "#ffffff",
         stroke: true,
-        pos: { x: 0.5, y: 0.42 },
+        pos: { x: 0.5048, y: 0.2377 },
       },
-      countdown: { enabled: true, from: 3, speed: 2, pos: { x: 0.5, y: 0.72 } },
+      countdown: { enabled: true, from: 3, speed: 2, fontSize: 170, pos: { x: 0.4993, y: 0.3864 } },
       curtain: {
         color: "#d11069",
         openDurationSec: 1.4,
@@ -120,23 +118,23 @@ export function makeDefaultConfig(): ProjectConfig {
       background: { kind: "builtin", id: "airport" },
       mic: {
         asset: { kind: "builtin", id: "mic" },
-        transform: { x: 0.78, y: 0.17, scale: 1, rotation: 0, flipH: false, flipV: false },
+        transform: { x: 0.8982, y: 0.0884, scale: 1.4316, rotation: 0, flipH: false, flipV: true },
       },
       device: {
         asset: { kind: "builtin", id: "phone" },
-        transform: { x: 0.55, y: 0.58, scale: 1, rotation: 0, flipH: false, flipV: false },
+        transform: { x: 0.5814, y: 0.6989, scale: 1.0407, rotation: 0, flipH: false, flipV: false },
       },
       teleprompter: {
         mode: "text",
-        // aligned to the black screen inside the built-in device image (measured)
-        screen: { x: 0.114, y: 0.02, w: 0.575, h: 0.86 },
+        // aligned to the black screen inside the built-in device image
+        screen: { x: 0.1258, y: 0.03, w: 0.5534, h: 0.8516 },
         text: {
           content: DEFAULT_TELEPROMPTER_TEXT,
           fontSize: 60,
           color: "#ffffff",
           bgColor: "#000000",
           align: "left",
-          speed: 1,
+          speed: 0.7,
         },
       },
       bgm: { asset: { kind: "builtin", id: "airport-bgm" }, volume: 1 },

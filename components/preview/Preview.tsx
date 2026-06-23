@@ -43,7 +43,6 @@ type DragState =
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-const COUNTDOWN_FONT = 170; // canvas px, mirrors Countdown.tsx
 const isOpening = (t: DragTarget): t is OpeningTarget => t === "title" || t === "countdown";
 
 export function Preview() {
@@ -261,13 +260,16 @@ export function Preview() {
       const { pos, fontSize, text } = config.opening.title;
       const width = CANVAS.width * 0.84;
       const charsPerLine = Math.max(1, Math.floor(width / (fontSize * 0.55)));
-      const lines = Math.max(1, Math.ceil(text.trim().length / charsPerLine));
-      const height = lines * fontSize * 1.15;
+      // Respect explicit line breaks, then add wrapping within each line.
+      const lines = text
+        .split("\n")
+        .reduce((acc, line) => acc + Math.max(1, Math.ceil(line.trim().length / charsPerLine)), 0);
+      const height = Math.max(1, lines) * fontSize * 1.15;
       return { left: pos.x * CANVAS.width - width / 2, top: pos.y * CANVAS.height - height / 2, width, height };
     }
-    const { pos } = config.opening.countdown;
-    const width = COUNTDOWN_FONT * 0.8;
-    const height = COUNTDOWN_FONT * 1.1;
+    const { pos, fontSize } = config.opening.countdown;
+    const width = fontSize * 0.8;
+    const height = fontSize * 1.1;
     return { left: pos.x * CANVAS.width - width / 2, top: pos.y * CANVAS.height - height / 2, width, height };
   };
 

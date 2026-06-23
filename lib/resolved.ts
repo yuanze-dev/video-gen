@@ -22,7 +22,7 @@ export type ResolvedConfig = {
       x: number;
       y: number;
     };
-    countdown: { enabled: boolean; from: number; speed: number; x: number; y: number };
+    countdown: { enabled: boolean; from: number; speed: number; fontSize: number; x: number; y: number };
     curtain: { color: string; openDurationSec: number };
     sfx: ResolvedAsset | null;
   };
@@ -83,6 +83,7 @@ export function resolveConfig(cfg: ProjectConfig, urls: UrlMap): ResolvedConfig 
         enabled: cfg.opening.countdown.enabled,
         from: cfg.opening.countdown.from,
         speed: cfg.opening.countdown.speed,
+        fontSize: cfg.opening.countdown.fontSize,
         x: cfg.opening.countdown.pos.x,
         y: cfg.opening.countdown.pos.y,
       },

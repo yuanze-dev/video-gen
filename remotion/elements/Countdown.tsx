@@ -6,11 +6,13 @@ import { CANVAS, FONT_STACK } from "../../lib/constants";
 export function Countdown({
   from,
   speed = 1,
+  fontSize = 170,
   x = 0.5,
   y = 0.72,
 }: {
   from: number;
   speed?: number;
+  fontSize?: number;
   x?: number;
   y?: number;
 }) {
@@ -29,7 +31,7 @@ export function Countdown({
         transform: "translate(-50%, -50%)",
         fontFamily: FONT_STACK,
         fontWeight: 900,
-        fontSize: 170,
+        fontSize,
         color: "#fff",
         WebkitTextStroke: "5px #000",
         paintOrder: "stroke fill",

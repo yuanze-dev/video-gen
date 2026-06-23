@@ -21,6 +21,7 @@ export function Title({
         fontWeight: 900,
         fontSize: title.fontSize,
         lineHeight: 1.15,
+        whiteSpace: "pre-line", // honor user line breaks; still wraps long lines
         color: title.color,
         WebkitTextStroke: title.stroke ? "4px #000" : undefined,
         paintOrder: "stroke fill",

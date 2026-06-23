@@ -1,9 +1,9 @@
 "use client";
 
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { useEditor } from "@/lib/store";
 
 const num = (v: number | readonly number[]) => (Array.isArray(v) ? v[0] : (v as number));
@@ -21,12 +21,16 @@ const CURTAIN_COLORS: { name: string; value: string }[] = [
 
 export function OpeningPanel() {
   const titleText = useEditor((s) => s.config.opening.title.text);
+  const titleFontSize = useEditor((s) => s.config.opening.title.fontSize);
   const countdownOn = useEditor((s) => s.config.opening.countdown.enabled);
   const countdownSpeed = useEditor((s) => s.config.opening.countdown.speed);
+  const countdownFontSize = useEditor((s) => s.config.opening.countdown.fontSize);
   const curtainColor = useEditor((s) => s.config.opening.curtain.color);
   const setTitleText = useEditor((s) => s.setTitleText);
+  const setTitleFontSize = useEditor((s) => s.setTitleFontSize);
   const toggleCountdown = useEditor((s) => s.toggleCountdown);
   const setCountdownSpeed = useEditor((s) => s.setCountdownSpeed);
+  const setCountdownFontSize = useEditor((s) => s.setCountdownFontSize);
   const setCurtainColor = useEditor((s) => s.setCurtainColor);
   const setView = useEditor((s) => s.setView);
 
@@ -48,12 +52,30 @@ export function OpeningPanel() {
       <div className="space-y-4">
         <div className="space-y-2">
           <Label htmlFor="title" className="text-xs">标题文字</Label>
-          <Input
+          <Textarea
             id="title"
             value={titleText}
+            rows={2}
+            maxLength={160}
+            placeholder="输入标题，按回车换行"
             onFocus={() => setView("opening")}
             onChange={(e) => setTitleText(e.target.value)}
           />
+          <p className="text-[11px] text-muted-foreground">按回车换行，预览与导出会同样换行</p>
+          <div className="flex items-center gap-3 pt-1">
+            <span className="w-16 text-[11px] text-muted-foreground">标题字号</span>
+            <Slider
+              min={40}
+              max={200}
+              step={2}
+              value={[titleFontSize]}
+              onValueChange={(v) => { setTitleFontSize(num(v)); setView("opening"); }}
+              className="flex-1"
+            />
+            <span className="w-10 text-right text-[11px] text-muted-foreground">
+              {Math.round(titleFontSize)}px
+            </span>
+          </div>
         </div>
 
         <div className="flex items-center justify-between">
@@ -62,19 +84,35 @@ export function OpeningPanel() {
         </div>
 
         {countdownOn && (
-          <div className="flex items-center gap-3">
-            <span className="w-16 text-[11px] text-muted-foreground">倒计时速度</span>
-            <Slider
-              min={0.5}
-              max={3}
-              step={0.1}
-              value={[countdownSpeed]}
-              onValueChange={(v) => { setCountdownSpeed(num(v)); setView("opening"); }}
-              className="flex-1"
-            />
-            <span className="w-10 text-right text-[11px] text-muted-foreground">
-              {countdownSpeed.toFixed(1)}×
-            </span>
+          <div className="space-y-3">
+            <div className="flex items-center gap-3">
+              <span className="w-16 text-[11px] text-muted-foreground">倒计时速度</span>
+              <Slider
+                min={0.5}
+                max={3}
+                step={0.1}
+                value={[countdownSpeed]}
+                onValueChange={(v) => { setCountdownSpeed(num(v)); setView("opening"); }}
+                className="flex-1"
+              />
+              <span className="w-10 text-right text-[11px] text-muted-foreground">
+                {countdownSpeed.toFixed(1)}×
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="w-16 text-[11px] text-muted-foreground">倒计时字号</span>
+              <Slider
+                min={80}
+                max={320}
+                step={2}
+                value={[countdownFontSize]}
+                onValueChange={(v) => { setCountdownFontSize(num(v)); setView("opening"); }}
+                className="flex-1"
+              />
+              <span className="w-10 text-right text-[11px] text-muted-foreground">
+                {Math.round(countdownFontSize)}px
+              </span>
+            </div>
           </div>
         )}
 
