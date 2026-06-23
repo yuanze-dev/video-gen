@@ -56,6 +56,7 @@ export function OpeningPanel() {
             id="title"
             value={titleText}
             rows={2}
+            maxLength={160}
             placeholder="输入标题，按回车换行"
             onFocus={() => setView("opening")}
             onChange={(e) => setTitleText(e.target.value)}
