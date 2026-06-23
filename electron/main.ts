@@ -5,7 +5,7 @@
 // via Vercel without re-distributing the desktop app. The only thing this
 // process adds is local MP4 rendering, exposed to the page over a narrow IPC
 // bridge (see preload.ts).
-import { app, BrowserWindow, ipcMain, dialog, shell } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { startRender, cancelRender, getJob, cleanupJob, type RenderRequest } from "./render";
@@ -59,6 +59,14 @@ function createWindow() {
     minHeight: 700,
     backgroundColor: "#0b0b0f",
     title: "小音符起号助手",
+    // Drop the native macOS title bar so the window reads as one continuous
+    // dark surface instead of a light chrome strip stacked on the dark editor.
+    // The page's own header already shows the product name, so the native title
+    // (which duplicated it) goes away with the bar. The traffic lights stay and
+    // float over the header; position them centered within its 56px height.
+    // (Window is macOS-only — electron-builder ships a mac arm64 dmg.)
+    titleBarStyle: "hidden",
+    trafficLightPosition: { x: 19, y: 21 },
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -163,6 +171,9 @@ ipcMain.handle("render:cleanup", async (_event, jobId: string) => {
 // ---- lifecycle --------------------------------------------------------------
 
 app.whenReady().then(() => {
+  // The editor UI is dark-only; force native chrome (traffic lights on hover,
+  // context menus, the save dialog) to match so nothing flashes light.
+  nativeTheme.themeSource = "dark";
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
