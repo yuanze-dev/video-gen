@@ -73,3 +73,17 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           GH_TOKEN: ${{ github.token }}
         run: npx electron-builder --mac --publish always
+
+      # electron-builder creates the GitHub release as a DRAFT (drafts aren't
+      # publicly readable, so auto-update clients can't see it). Publish it, and
+      # drop the redundant package-name zip electron-builder emits alongside the
+      # littlestart-*.zip that latest-mac.yml actually references (|| true so a
+      # naming change never fails the release).
+      - name: Finalize release (publish + tidy)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RAW="$(node -p "require('./package.json').version")"
+          VERSION="v$RAW"
+          gh release edit "$VERSION" --draft=false
+          gh release delete-asset "$VERSION" "video-gen-$RAW-arm64-mac.zip" --yes || true
