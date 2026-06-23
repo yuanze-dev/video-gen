@@ -30,8 +30,10 @@ type State = {
   setSelected: (s: DragTarget | null) => void;
 
   setTitleText: (t: string) => void;
+  setTitleFontSize: (size: number) => void;
   toggleCountdown: (enabled: boolean) => void;
   setCountdownSpeed: (speed: number) => void;
+  setCountdownFontSize: (size: number) => void;
   setCurtainColor: (color: string) => void;
   setTeleMode: (mode: "text" | "video") => void;
   setTeleText: (content: string) => void;
@@ -77,6 +79,17 @@ export const useEditor = create<State>((set, get) => ({
       },
     })),
 
+  setTitleFontSize: (fontSize) =>
+    set((s) => ({
+      config: {
+        ...s.config,
+        opening: {
+          ...s.config.opening,
+          title: { ...s.config.opening.title, fontSize },
+        },
+      },
+    })),
+
   toggleCountdown: (enabled) =>
     set((s) => ({
       config: {
@@ -95,6 +108,17 @@ export const useEditor = create<State>((set, get) => ({
         opening: {
           ...s.config.opening,
           countdown: { ...s.config.opening.countdown, speed },
+        },
+      },
+    })),
+
+  setCountdownFontSize: (fontSize) =>
+    set((s) => ({
+      config: {
+        ...s.config,
+        opening: {
+          ...s.config.opening,
+          countdown: { ...s.config.opening.countdown, fontSize },
         },
       },
     })),

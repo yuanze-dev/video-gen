@@ -22,7 +22,7 @@ export function Opening({ config }: { config: ResolvedConfig }) {
     <AbsoluteFill>
       <Background asset={config.content.background} />
       <Title title={config.opening.title} opacity={titleOpacity} />
-      {cd.enabled && <Countdown from={cd.from} speed={cd.speed} x={cd.x} y={cd.y} />}
+      {cd.enabled && <Countdown from={cd.from} speed={cd.speed} fontSize={cd.fontSize} x={cd.x} y={cd.y} />}
       <Curtain color={config.opening.curtain.color} startSec={0} openDurationSec={openingDur} />
     </AbsoluteFill>
   );

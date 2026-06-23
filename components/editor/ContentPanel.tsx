@@ -84,7 +84,7 @@ export function ContentPanel() {
 
         <div className="space-y-2">
           <Label className="text-xs">背景音乐</Label>
-          <Uploader target="bgm" accept="audio/*" icon={<Music className="size-4" />} defaultName="无背景音乐" hint="点击上传音频" />
+          <Uploader target="bgm" accept="audio/*" icon={<Music className="size-4" />} defaultName={bgm ? "默认背景音乐" : "无背景音乐"} hint="点击上传音频" />
           {bgm ? (
             <div className="flex items-center gap-3 pt-1">
               <span className="w-16 text-[11px] text-muted-foreground">音量</span>
