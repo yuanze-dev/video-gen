@@ -17,6 +17,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Fail fast with a clear message if signing/notarization secrets are absent.
+      # (GitHub passes unset secrets as empty strings, which makes electron-builder
+      # choke with a cryptic "not a file" error.)
+      - name: Check required secrets
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          miss=""
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then miss="$miss $v"; fi
+          done
+          if [ -n "$miss" ]; then
+            echo "::error::Missing required repo secrets:$miss — add them in Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          echo "All required secrets present."
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -34,13 +55,14 @@ jobs:
           npm run build:electron
 
       # Sign with the Developer ID cert (CSC_LINK = base64 of the .p12).
-      # APPLE_* are intentionally NOT exposed here, so the afterSign notarize
-      # hook stays a no-op and we notarize the dmg explicitly in the next step.
+      # --publish never: we publish explicitly below (and notarize the dmg first).
+      # APPLE_* are intentionally NOT exposed here, so the afterSign notarize hook
+      # stays a no-op and we notarize the dmg explicitly in the next step.
       - name: Build & sign (Developer ID)
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-        run: npx electron-builder --mac
+        run: npx electron-builder --mac --publish never
 
       - name: Notarize + staple dmg
         env:
