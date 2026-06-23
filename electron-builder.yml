@@ -95,6 +95,10 @@ afterSign: build/notarize.cjs
 mac:
   category: public.app-category.video
   icon: build/icon.icns
+  # ASCII artifact name (productName is Chinese → unescaped chars crash the
+  # GitHub upload, and GitHub strips non-ASCII anyway). Applies to the zip; the
+  # dmg: block below overrides with its own ASCII name.
+  artifactName: littlestart-${version}-${arch}-mac.${ext}
   target:
     - target: dmg # first-install download (drag-to-Applications)
       arch:
