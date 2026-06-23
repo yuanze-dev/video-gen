@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read # release assets go to the separate public repo via RELEASES_TOKEN
+  contents: write # create/upload the GitHub Release (auto-update feed) in this repo
 
 jobs:
   build-mac:
@@ -27,13 +27,9 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # PAT (Contents: write) on the PUBLIC yuanze-dev/video-gen-releases repo.
-          # The default GITHUB_TOKEN only reaches this repo, so a cross-repo publish
-          # needs its own token.
-          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
           miss=""
-          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID RELEASES_TOKEN; do
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
             if [ -z "${!v}" ]; then miss="$miss $v"; fi
           done
           if [ -n "$miss" ]; then
@@ -65,9 +61,9 @@ jobs:
       #     app (a dmg-only notarize would leave the zip's app unstapled → updates
       #     download but Gatekeeper rejects them).
       #   • GH_TOKEN → --publish always uploads dmg + zip + latest-mac.yml +
-      #     blockmap to the PUBLIC yuanze-dev/video-gen-releases repo (see the
-      #     publish: block in electron-builder.yml). The client reads that feed
-      #     with no token.
+      #     blockmap to this repo's Releases (see the publish: block in
+      #     electron-builder.yml). The repo is public, so clients read the feed
+      #     with no token; the default GITHUB_TOKEN has enough scope to publish.
       - name: Build, sign, notarize & publish
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -75,5 +71,5 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: npx electron-builder --mac --publish always
