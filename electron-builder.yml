@@ -100,6 +100,8 @@ mac:
 # Drag-to-install window: branded background, app icon on the left, an arrow,
 # and the /Applications alias on the right.
 dmg:
+  # ASCII file name — GitHub strips non-ASCII (Chinese) from release asset names.
+  artifactName: littlestart-${version}-${arch}.${ext}
   background: build/dmg-bg.png
   iconSize: 110
   window:
