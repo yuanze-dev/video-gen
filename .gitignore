@@ -21,6 +21,11 @@
 /public/remotion-site/
 /electron/dist/
 /cli/dist/
+/packages/littlestart-cli/dist/
+/packages/littlestart-cli/runtime/
+/packages/littlestart-cli/skills/
+/packages/littlestart-cli/README.md
+/.artifacts/
 /output/
 /.remotion-build/
 
@@ -32,6 +37,7 @@
 /build/*
 !/build/entitlements.mac.plist
 !/build/notarize.cjs
+!/build/verify-cli-resource.cjs
 !/build/icon.icns
 !/build/dmg-bg.png
 !/build/dmg-bg@2x.png

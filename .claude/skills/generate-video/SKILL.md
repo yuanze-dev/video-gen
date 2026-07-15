@@ -1,159 +1,37 @@
 ---
 name: generate-video
-description: 用本地 CLI 生成"小音符起号助手"的提词器视频（1080x1920 竖屏 MP4），无需打开 GUI。当用户要求生成/渲染/导出提词器视频，或要修改视频元素（标题、词稿、颜色、背景图、背景音乐、倒计时、幕布、麦克风/设备位置、片尾视频）并出片时使用。触发词：生成视频、出个视频、渲染、出一版、改词稿、换背景、换 BGM、换音乐、改标题、改颜色、换片尾。
+description: 使用 Littlestart 本地 CLI 在不打开 GUI 的情况下创建、校验、预览、渲染或批量生产“小音符起号助手”竖屏提词视频。用于用户要求生成视频、出片、改标题或词稿、替换背景/BGM/片尾、检查静帧、探测媒体、排查本地渲染失败、编排 Codex 或 Claude Code 视频流水线时；也用于维护可复现配置、锁文件和断点续跑批次。
 ---
 
-# 本地视频生成（AI 调用入口）
+# 使用 Littlestart 生成视频
 
-这个仓库的视频是一个三段固定模板：**开场 `opening`（粉色幕布 + 标题 + 倒计时）→ 正片 `content`（背景场景里的手持提词器手机滚动词稿，可配麦克风、背景音乐）→ 片尾 `ending`（默认 FlowPrompter 内置视频，保留原声）**。所有元素由一份 JSON 配置驱动，CLI 在本机渲染出 MP4；片尾始终存在，但可替换为另一段完整视频。
+优先调用 `littlestart`；`video-gen` 是兼容别名。通过当前二进制自发现能力，不凭记忆猜配置字段、素材 id 或选项。
 
-## 工作流程
+## 执行流程
 
-1. **写配置**：按用户要求写一份*部分* JSON 配置（改哪写哪，未写字段用默认值），存到项目里或用户指定的位置，如 `output/my-video.json`。
-2. **校验**：`node scripts/cli.mjs validate 配置.json` — 检查字段并返回三段时长预估（stdout 是 JSON）。
-3. **渲染**：`node scripts/cli.mjs render 配置.json --out output/名字.mp4`
-4. **报告**：把 stdout JSON 里的输出路径、时长、文件大小告诉用户。
+1. 运行 `littlestart version --json` 确认二进制与协议；若二进制存在但环境失败，再运行 `littlestart doctor --json`。只有用户允许准备依赖时才运行 `doctor --fix`。若 shell 明确提示命令不存在，先尝试兼容名 `video-gen`；两者都不存在时，不要继续调用 `doctor`，应按项目提供的 tgz / registry 安装说明定位 CLI，或向用户索取安装来源。
+2. 在首次使用或版本变化后运行 `capabilities --json`。需要字段时运行 `config schema --json`，需要命令参数时运行 `help <命令>`。
+3. 创建一份只包含用户改动的 JSON 配置。优先用 `init --minimal` 起步；本地素材使用 `kind: "file"`，不要复用 GUI 的临时 `upload` id。
+4. 依次运行 `validate --json` 与 `plan --json`。若选择了非默认 `--quality` / `--resolution` / `--fps`，这三个命令和最终 `render` 必须使用完全相同的值；稳定流水线优先生成锁文件。根据 `error.code`、`issues[].path` 和 hint 修复问题，不要用日志文本猜原因。
+5. 对视觉改动先运行 `still --scene all`，实际查看静帧；标题换行、背景、幕布颜色、素材位置或设备屏幕区域变化时必须执行这一步。
+6. 运行 `render`。长任务使用 `--events ndjson`，同时检查退出码与最终 `result`/`error` 终态。
+7. 向用户报告 CLI 返回的正式输出路径、成片时长和关键规格；不要把预期路径或临时文件当成成功结果。
 
-命令必须在项目根目录运行（`package.json` 所在目录）。也可以用 `npm run cli -- render …`。
+## 决策规则
 
-## 命令参考
+- 读取或修改配置前，按需阅读 [references/config.md](references/config.md)。不要复制一份完整 schema 到对话或脚本中。
+- 编排单条、批量、离线 CI、断点恢复或错误恢复时，阅读 [references/workflows.md](references/workflows.md)。解析机器输出或退出码时，阅读 [references/protocol.md](references/protocol.md)。
+- 默认不覆盖已有产物。只有用户明确允许替换时才加 `--force`。
+- 素材路径必须存在且与槽位类型匹配。相对路径以配置文件目录为基准；配置从 stdin 传入时优先使用绝对路径。
+- `plan` 的 `assets` 只表示已解析的本地文件，不是全部内置素材清单。核对内置引用时结合 `config resolve`、`assets list` 和 `assets inspect`。
+- 不虚构远程下载、云端渲染、模板市场或第三方模板能力。当前工作流以 CLI 随包提供的本机模板和素材为边界。
+- 公开发行 CLI、向客户分发，或交付使用内置素材生成的视频前，必须审查随包 `ASSET_RIGHTS.md`；任何 `REQUIRES_CONFIRMATION` 都阻断发行。
+- 不推断用户或组织已获得 Remotion 许可。需要密钥时只使用 `REMOTION_LICENSE_KEY`，不把它写入配置、manifest、锁文件、日志或回复。
+- 不因一次失败就清空缓存。先按错误分类运行 `validate`、`probe`、`assets inspect` 或 `doctor`，仅在证据指向缓存问题时清理。
+- 收到取消请求时让 CLI 处理信号并等待退出，不手动发布半成品。
 
-```bash
-node scripts/cli.mjs render <配置.json> [--out 视频.mp4] [--cover 封面.jpg] \
-  [--quality high|standard|small] [--resolution 1080p|720p] [--fps 30|60] [--rebuild]
-node scripts/cli.mjs validate <配置.json>   # 校验 + 时长预估
-node scripts/cli.mjs init [路径]            # 导出完整默认配置（看全部字段用）
-node scripts/cli.mjs assets                 # 列出内置素材
-```
+## 机器输出
 
-- 进度和日志走 stderr；`render` 的最终结果是 stdout 上的一段 JSON（`ok/output/cover/durationSec/sizeBytes/quality/resolution/fps`）。
-- `validate` 返回 `ok/durationSec/openingSec/contentSec/endingSec/localFiles/canvas`；`assets` 返回 `ok/builtin`，其中每项包含 `id/type/usage/desc`。
-- 渲染耗时大约与视频时长同量级；首次运行会自动下载无头 Chromium，首次/源码变更后会多花 10~30 秒打包合成站点（有缓存）。
+短命令使用 `--json`；渲染和批量任务使用 `--events ndjson`。stdout 只作为机器协议读取，stderr 只用于诊断。不要混用两种模式，也不要 grep 人类文案判断成功。
 
-## 素材引用（三种写法）
-
-```jsonc
-{ "kind": "builtin", "id": "airport" }          // 内置素材
-{ "kind": "file", "path": "./bg.jpg" }          // 本地文件，路径相对配置文件所在目录
-{ "kind": "file", "path": "/绝对/路径/music.mp3" }
-```
-
-内置素材：`airport`（机场背景图）、`mic`（麦克风图）、`phone`（提词器手机图）、`open-sfx`（开场音效）、`airport-bgm`（机场广播 BGM）、`flowprompter-outro`（FlowPrompter 默认片尾，使用位置 `ending.video.asset`）。
-
-支持的本地格式 — 图片: jpg/png/webp/gif；音频: mp3/wav/m4a/aac/ogg/flac；视频: mp4/mov/webm/m4v。文件类型和槽位不匹配（比如给背景传了 mp3）会在校验时报错。
-
-## 配置字段速查
-
-配置会**深合并**到默认配置上，所以只写要改的字段。坐标一律是 0..1 归一化（相对 1080x1920 画布，`pos`/`x`/`y` 是元素中心点）。
-
-```jsonc
-{
-  "opening": {
-    "title": {
-      "text": "标题文字（支持 \n 换行）",   // 常改
-      "fontSize": 92,                        // 画布像素
-      "color": "#ffffff",
-      "stroke": true,                        // 黑色描边
-      "pos": { "x": 0.5, "y": 0.24 }
-    },
-    "countdown": {
-      "enabled": true,
-      "from": 3,                             // 从几开始倒数（1-10）
-      "speed": 2,                            // 每秒跳几个数（0.5-3）
-      "fontSize": 170,
-      "pos": { "x": 0.5, "y": 0.39 }
-    },
-    "curtain": {
-      "color": "#d11069",                    // 幕布颜色，常改
-      "openDurationSec": 1.4,                // 拉开耗时（0.4-4）
-      "sfx": { "kind": "builtin", "id": "open-sfx" }   // 可设 null 关掉音效
-    }
-  },
-  "content": {
-    "background": { "kind": "file", "path": "./bg.jpg" },   // 背景图，常改
-    "mic":    { "asset": {…}, "transform": { "x": 0.9, "y": 0.09, "scale": 1.43, "rotation": 0, "flipH": false, "flipV": true } },
-    "device": { "asset": {…}, "transform": { "x": 0.58, "y": 0.7, "scale": 1.04, "rotation": 0, "flipH": false, "flipV": false } },
-    "teleprompter": {
-      "mode": "text",                        // "text" 滚动词稿 | "video" 播放视频
-      "screen": { "x": 0.1258, "y": 0.03, "w": 0.5534, "h": 0.8516 },  // 屏幕区域，用内置手机图时别动
-      "text": {
-        "content": "词稿正文……（开头留几个 \n 让文字从屏幕下方滚入）",  // 最常改
-        "fontSize": 60,
-        "color": "#ffffff",
-        "bgColor": "#000000",
-        "align": "left",                     // left | center
-        "speed": 0.7                         // 滚动速度倍率（0.3-3），决定视频长度
-      },
-      "video": { "asset": { "kind": "file", "path": "./录屏.mp4" }, "keepAudio": true }  // mode=video 时用
-    },
-    "bgm": { "asset": { "kind": "file", "path": "./music.mp3" }, "volume": 0.8 }  // 设 null 关掉 BGM
-  },
-  "ending": {
-    "video": {
-      "asset": { "kind": "builtin", "id": "flowprompter-outro", "durationSec": 2.227664 },
-      "keepAudio": true
-    }
-  }
-}
-```
-
-**时长是自动算的**：开场 = 倒计时秒数 ÷ speed；正文 = 词稿滚完所需时间（文字越长/速度越慢视频越长，6~600 秒封顶），`mode: "video"` 时 = 视频时长；片尾 = `ending.video.asset.durationSec`。三段分别对齐到帧后相加，`validate` 会同时给出 `openingSec/contentSec/endingSec/durationSec`。本地视频的时长会自动探测，也可在 `asset` 上手动指定 `durationSec`。
-
-## 常见配方
-
-**改词稿 + 标题出一版**（最常见，其余全默认）：
-
-```json
-{
-  "opening": { "title": { "text": "新标题" } },
-  "content": { "teleprompter": { "text": { "content": "\n\n\n\n新的词稿正文……" } } }
-}
-```
-
-**换背景图 + 换音乐 + 改幕布颜色**：
-
-```json
-{
-  "opening": { "curtain": { "color": "#1e40af" } },
-  "content": {
-    "background": { "kind": "file", "path": "./咖啡馆.jpg" },
-    "bgm": { "asset": { "kind": "file", "path": "./轻音乐.mp3" }, "volume": 0.6 }
-  }
-}
-```
-
-**提词器里放自己的视频**（时长自动探测）：
-
-```json
-{
-  "content": {
-    "teleprompter": {
-      "mode": "video",
-      "video": { "asset": { "kind": "file", "path": "./口播.mp4" }, "keepAudio": true }
-    },
-    "bgm": null
-  }
-}
-```
-
-**替换默认片尾**（整段替换，时长自动探测并保留原声）：
-
-```json
-{
-  "ending": {
-    "video": {
-      "asset": { "kind": "file", "path": "./my-outro.mp4" },
-      "keepAudio": true
-    }
-  }
-}
-```
-
-## 注意事项
-
-- 词稿开头留 4 个左右 `\n`，让首行从屏幕内滚起（默认配置就是这么做的）。
-- 换了自定义设备图才需要调 `screen`；用内置 `phone` 图时保持默认。
-- 渲染失败先跑 `validate` 看报错；报错信息是中文的、按字段定位。
-- 没有写 `ending` 时会自动使用内置 `flowprompter-outro`；正片 BGM 只覆盖 `content`，片尾默认播放自身原声。
-- 用户没说输出路径时，默认放到 `output/`，文件名用内容起（如 `output/口语练习-0710.mp4`）。
-- 批量出片：写多份配置循环调用 render 即可，bundle 和浏览器会复用缓存。
+在自动化中保留源配置、`version`、`plan` 或锁文件、最终结果信封。安装后的 Skill 已随附 [references/protocol.md](references/protocol.md)；仍应以当前二进制的 `protocolVersion`、`help` 与 `capabilities` 为准。

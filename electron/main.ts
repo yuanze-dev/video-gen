@@ -5,9 +5,18 @@
 // via Vercel without re-distributing the desktop app. The only thing this
 // process adds is local MP4 rendering, exposed to the page over a narrow IPC
 // bridge (see preload.ts).
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } from "electron";
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  shell,
+  nativeTheme,
+  type IpcMainInvokeEvent,
+} from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { DESKTOP_CLI_CHANNELS } from "../lib/desktop-bridge";
 import {
   startRender,
   cancelRender,
@@ -19,6 +28,7 @@ import {
   type RenderRequest,
 } from "./render";
 import { initAutoUpdate } from "./updater";
+import { createDesktopCliInstaller } from "./cli-installer";
 
 // In the packaged app, node_modules lives inside app.asar (read-only, can't
 // execute binaries) and the chromium download dir isn't writable. Point Remotion
@@ -60,6 +70,78 @@ const trustedOrigin = (() => {
 })();
 
 let mainWindow: BrowserWindow | null = null;
+
+function isTrustedCliRequest(event: IpcMainInvokeEvent, argumentCount: number): boolean {
+  if (argumentCount !== 0 || !mainWindow || event.sender !== mainWindow.webContents) return false;
+  const frame = event.senderFrame;
+  if (!frame || frame !== event.sender.mainFrame) return false;
+  try {
+    return new URL(frame.url).origin === trustedOrigin;
+  } catch {
+    return false;
+  }
+}
+
+function initCliInstall(): void {
+  const installer = createDesktopCliInstaller({
+    supported: app.isPackaged && process.platform === "darwin" && process.arch === "arm64",
+    homeDir: app.getPath("home"),
+    shellPath: process.env.SHELL?.trim() || "/bin/zsh",
+    pathEnv: process.env.PATH ?? "",
+    appExecutable: process.execPath,
+    resourcesPath: process.resourcesPath,
+    cliRoot: path.join(process.resourcesPath, "cli"),
+  });
+  let confirmationInFlight: Promise<boolean> | null = null;
+
+  const confirmInstall = (state: Awaited<ReturnType<typeof installer.getState>>): Promise<boolean> => {
+    if (confirmationInFlight) return confirmationInFlight;
+    const window = mainWindow;
+    if (!window) return Promise.resolve(false);
+    const verb = state.status === "not-installed" ? "安装" : "修复";
+    confirmationInFlight = dialog
+      .showMessageBox(window, {
+        type: "question",
+        title: `${verb} Littlestart CLI`,
+        message: `${verb}命令行工具？`,
+        detail: `将写入 ${state.installPath ?? "~/.local/bin/littlestart"}，并在需要时为新终端配置 PATH。不会使用管理员权限或联网下载。`,
+        buttons: [verb, "取消"],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      })
+      .then((result) => result.response === 0)
+      .finally(() => {
+        confirmationInFlight = null;
+      });
+    return confirmationInFlight;
+  };
+
+  ipcMain.handle(DESKTOP_CLI_CHANNELS.getState, (event, ...args: unknown[]) => {
+    if (!isTrustedCliRequest(event, args.length)) {
+      throw new Error("拒绝来自非可信页面的 CLI 请求");
+    }
+    return installer.getState();
+  });
+
+  ipcMain.handle(DESKTOP_CLI_CHANNELS.install, async (event, ...args: unknown[]) => {
+    if (!isTrustedCliRequest(event, args.length)) {
+      throw new Error("拒绝来自非可信页面的 CLI 请求");
+    }
+
+    const state = await installer.getState();
+    if (
+      state.status === "not-installed" ||
+      state.status === "repair-needed" ||
+      state.status === "installed"
+    ) {
+      if (!(await confirmInstall(state))) {
+        return { ok: false as const, canceled: true, error: "已取消安装", state };
+      }
+    }
+    return installer.install();
+  });
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -208,6 +290,7 @@ app.whenReady().then(() => {
   // Register updater IPC before loading the remote page so hydration can never
   // race ahead of the main-process handlers.
   initAutoUpdate(() => mainWindow);
+  initCliInstall();
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

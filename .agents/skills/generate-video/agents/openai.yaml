@@ -1,0 +1,4 @@
+interface:
+  display_name: "小音符视频生产"
+  short_description: "使用本地 CLI 自动生成、预检并批量渲染竖屏提词视频"
+  default_prompt: "使用 $generate-video 将我的文案和本地素材校验、预览并渲染成视频。"

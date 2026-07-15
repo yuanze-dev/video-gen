@@ -58,11 +58,12 @@ jobs:
       - name: Ensure headless Chromium (chrome-headless-shell)
         run: node scripts/ensure-chrome.mjs
 
-      - name: Build Remotion site + Electron bundles
+      - name: Build CLI, Remotion site + Electron bundles
         run: |
           npm run build:remotion-site
+          npm run build:cli
           npm run typecheck:electron
-          npm run test:update
+          npm run test:desktop
           npm run build:electron
 
       # One step does it all now that auto-update is in play:

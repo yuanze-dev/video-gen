@@ -1,230 +1,1009 @@
-// Local bundling + rendering for the CLI. Mirrors lib/render/jobs.ts (web) but
-// runs standalone in Node: the Remotion entry is bundled with a content-hash
-// cache under node_modules/.cache, file-based assets are served over a
-// loopback HTTP server (same pattern as electron/render.ts), and the local
-// headless Chromium is driven via @remotion/renderer.
 import http from "node:http";
 import path from "node:path";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
+import type { Socket } from "node:net";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { format as formatLog } from "node:util";
+import type { CancelSignal, LogLevel } from "@remotion/renderer";
 import type { ProjectConfig } from "../lib/config-schema";
-import { resolveConfig } from "../lib/resolved";
-import { totalSec } from "../lib/duration";
+import { resolveConfig, type ResolvedConfig } from "../lib/resolved";
+import {
+  contentFrames,
+  openingFrames,
+  totalSec,
+} from "../lib/duration";
 import { crfFor, scaleFor, type ExportOptions } from "../lib/export-options";
 import type { LocalFile } from "./config";
+import {
+  getCacheDirectory,
+  removeStaleCacheStaging,
+  withCacheMaintenanceLock,
+  withFileLock,
+} from "./cache";
+import { probeMedia, type MediaProbe } from "./media";
+import {
+  resolveChromiumGlRenderer,
+  type ChromiumGlRenderer,
+} from "./chromium";
 
-export type RenderParams = {
-  root: string; // project root (where remotion/, lib/, public/ live)
+export { getCacheDirectory, withCacheMaintenanceLock, withFileLock } from "./cache";
+export { probeMedia } from "./media";
+
+export type RenderBaseParams = {
+  /** Source project root. Optional when `serveUrl` or `runtimeSite` is set. */
+  root?: string;
   config: ProjectConfig;
   files: Record<string, LocalFile>;
   options: ExportOptions;
+  /** A ready Remotion URL or local bundle directory. Takes precedence over bundling. */
+  serveUrl?: string;
+  /** Path to a prebuilt, read-only Remotion site containing index.html. */
+  runtimeSite?: string;
+  /** Overrides the user cache root for this invocation. */
+  cacheDir?: string;
+  rebuild?: boolean;
+  /** Native cancellation for CLI signal handling. */
+  signal?: AbortSignal;
+  /** Remotion cancellation for callers already using makeCancelSignal(). */
+  cancelSignal?: CancelSignal;
+  /** Defaults to error so renderer diagnostics never pollute machine stdout. */
+  logLevel?: LogLevel;
+  browserExecutable?: string;
+  binariesDirectory?: string;
+  log?: (message: string) => void;
+};
+
+export type RenderParams = RenderBaseParams & {
   outPath: string;
   coverPath?: string;
-  rebuild?: boolean; // force a fresh Remotion bundle
+  /** Existing outputs are rejected unless overwrite is explicitly true. */
+  overwrite?: boolean;
   onProgress?: (progress: number) => void;
-  log?: (msg: string) => void;
 };
 
 export type RenderOutput = {
   outputPath: string;
   coverPath?: string;
   durationSec: number;
+  media: MediaProbe;
+};
+
+export type StillScene = "opening" | "content" | "ending";
+
+export type RenderStillParams = RenderBaseParams & {
+  outPath: string;
+  scene?: StillScene;
+  frame?: number;
+  imageFormat?: "jpeg" | "png";
+  jpegQuality?: number;
+  overwrite?: boolean;
+};
+
+export type RenderStillOutput = {
+  outputPath: string;
+  frame: number;
+  scene: StillScene | null;
+};
+
+export type RenderSceneStillsParams = RenderBaseParams & {
+  outDir: string;
+  scenes?: StillScene[];
+  imageFormat?: "jpeg" | "png";
+  jpegQuality?: number;
+  overwrite?: boolean;
+};
+
+export type RenderSceneStillsOutput = {
+  outputs: Partial<Record<StillScene, RenderStillOutput>>;
 };
 
 // ---- bundle cache -----------------------------------------------------------
 
-async function collectSourceFiles(dir: string, out: string[]): Promise<void> {
+async function collectSourceFiles(
+  dir: string,
+  out: string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal);
   const entries = await fs.readdir(dir, { withFileTypes: true });
-  for (const e of entries) {
-    const fp = path.join(dir, e.name);
-    if (e.isDirectory()) await collectSourceFiles(fp, out);
-    else if (/\.(ts|tsx)$/.test(e.name)) out.push(fp);
+  for (const entry of entries) {
+    throwIfAborted(signal);
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) await collectSourceFiles(file, out, signal);
+    else if (/\.(ts|tsx)$/.test(entry.name)) out.push(file);
   }
 }
 
-async function collectAllFiles(dir: string, out: string[]): Promise<void> {
+async function collectAllFiles(
+  dir: string,
+  out: string[],
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal);
   const entries = await fs.readdir(dir, { withFileTypes: true });
-  for (const e of entries) {
-    const fp = path.join(dir, e.name);
-    if (e.isDirectory()) await collectAllFiles(fp, out);
-    else out.push(fp);
+  for (const entry of entries) {
+    throwIfAborted(signal);
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) await collectAllFiles(file, out, signal);
+    else out.push(file);
   }
 }
 
-// Content hash of everything that affects the bundle output: composition and
-// shared lib sources plus the lockfile (dependency upgrades invalidate too).
-async function hashSources(root: string): Promise<string> {
+async function hashSources(root: string, signal?: AbortSignal): Promise<string> {
   const files: string[] = [];
   for (const dir of ["remotion", "lib"]) {
-    await collectSourceFiles(path.join(root, dir), files);
+    await collectSourceFiles(path.join(root, dir), files, signal);
   }
-  // Built-in assets are copied into the Remotion bundle. Include them in the
-  // cache key so replacing the default ending (or any other built-in) can never
-  // reuse a bundle containing stale bytes.
-  await collectAllFiles(path.join(root, "public", "assets", "builtin"), files);
-  files.push(path.join(root, "package-lock.json"));
+  await collectAllFiles(path.join(root, "public", "assets"), files, signal);
+
+  const lockfile = path.join(root, "package-lock.json");
+  const packageFile = path.join(root, "package.json");
+  files.push((await fs.stat(lockfile).catch(() => null))?.isFile() ? lockfile : packageFile);
   files.sort();
 
-  const h = crypto.createHash("sha1");
-  for (const f of files) {
-    h.update(path.relative(root, f));
-    h.update(await fs.readFile(f));
+  const hash = crypto.createHash("sha256");
+  // This salt represents the on-disk contract expected by the renderer. It
+  // must change whenever bundle options or required artifacts change, even if
+  // the Remotion composition sources themselves did not. Version 2 requires
+  // the source map consumed by @remotion/renderer during server preparation.
+  hash.update("littlestart-remotion-bundle-v2-sourcemap\0");
+  for (const file of files) {
+    throwIfAborted(signal);
+    hash.update(path.relative(root, file));
+    hash.update("\0");
+    hash.update(await fs.readFile(file));
+    hash.update("\0");
   }
-  return h.digest("hex").slice(0, 12);
+  return hash.digest("hex").slice(0, 16);
 }
 
-// Returns a serveUrl (local bundle directory) for the composition, bundling
-// only when sources changed since the cached bundle was built.
+async function isBundleReady(directory: string): Promise<boolean> {
+  const requiredFiles = ["index.html", "bundle.js", "bundle.js.map"];
+  const checks = await Promise.all(
+    requiredFiles.map((file) =>
+      fs
+        .stat(path.join(directory, file))
+        .then((stat) => stat.isFile() && stat.size > 0)
+        .catch(() => false),
+    ),
+  );
+  return checks.every(Boolean);
+}
+
+function randomId(): string {
+  return `${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
+}
+
+function maintenanceRootForBundleCache(cacheRoot: string): string {
+  return path.basename(cacheRoot) === "remotion-bundles"
+    ? path.dirname(cacheRoot)
+    : cacheRoot;
+}
+
+/**
+ * Returns an immutable content-addressed Remotion bundle in the user's cache.
+ * Only public/assets is staged, so a generated public/remotion-site can never
+ * recursively become part of the next bundle.
+ */
 export async function ensureBundle(
   root: string,
-  opts: { rebuild?: boolean; log?: (msg: string) => void } = {},
+  options: {
+    rebuild?: boolean;
+    log?: (message: string) => void;
+    cacheDir?: string;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<string> {
-  const cacheRoot = path.join(root, "node_modules", ".cache", "video-gen-cli");
-  const hash = await hashSources(root);
-  const dest = path.join(cacheRoot, `bundle-${hash}`);
+  throwIfAborted(options.signal);
+  const absoluteRoot = path.resolve(root);
+  const cacheRoot = path.resolve(
+    options.cacheDir ?? path.join(getCacheDirectory(), "remotion-bundles"),
+  );
+  const hash = await hashSources(absoluteRoot, options.signal);
+  throwIfAborted(options.signal);
+  const destination = path.join(cacheRoot, `bundle-${hash}`);
+  const maintenanceRoot = maintenanceRootForBundleCache(cacheRoot);
 
-  const cached = await fs
-    .stat(path.join(dest, "index.html"))
-    .then((s) => s.isFile())
-    .catch(() => false);
-  if (cached && !opts.rebuild) return dest;
+  try {
+    return await withCacheMaintenanceLock(maintenanceRoot, async () => {
+      throwIfAborted(options.signal);
+      await fs.mkdir(cacheRoot, { recursive: true });
+      throwIfAborted(options.signal);
+      return withFileLock(path.join(cacheRoot, ".bundle-cache.lock"), async () => {
+        throwIfAborted(options.signal);
+        if (!options.rebuild && (await isBundleReady(destination))) return destination;
+        await removeStaleCacheStaging(cacheRoot);
+        throwIfAborted(options.signal);
 
-  opts.log?.("打包 Remotion 合成站点（源码有更新，约 10-30 秒）…");
-  const { bundle } = await import("@remotion/bundler");
-  const outDir = await bundle({
-    entryPoint: path.join(root, "remotion", "index.ts"),
-    publicDir: path.join(root, "public"),
-  });
+        const id = randomId();
+        const publicStage = path.join(cacheRoot, `.public-${hash}-${id}.partial`);
+        const bundleStage = path.join(cacheRoot, `.bundle-${hash}-${id}.partial`);
+        let bundlerOutput: string | undefined;
+        try {
+          // Keep staticFile("assets/…") behavior while excluding every other
+          // public child, most importantly the generated remotion-site itself.
+          await fs.mkdir(publicStage, { recursive: true });
+          throwIfAborted(options.signal);
+          await fs.cp(path.join(absoluteRoot, "public", "assets"), path.join(publicStage, "assets"), {
+            recursive: true,
+          });
+          throwIfAborted(options.signal);
 
-  await fs.rm(dest, { recursive: true, force: true });
-  await fs.mkdir(cacheRoot, { recursive: true });
-  await fs.cp(outDir, dest, { recursive: true });
+          options.log?.("打包 Remotion 合成站点（源码有更新，约 10-30 秒）…");
+          const { bundle } = await import("@remotion/bundler");
+          throwIfAborted(options.signal);
+          bundlerOutput = await bundle({
+            entryPoint: path.join(absoluteRoot, "remotion", "index.ts"),
+            publicDir: publicStage,
+          });
+          throwIfAborted(options.signal);
 
-  // Keep only the current bundle so the cache never grows unbounded.
-  const entries = await fs.readdir(cacheRoot).catch(() => [] as string[]);
-  for (const e of entries) {
-    if (e.startsWith("bundle-") && e !== `bundle-${hash}`) {
-      await fs.rm(path.join(cacheRoot, e), { recursive: true, force: true }).catch(() => {});
-    }
+          await fs.cp(bundlerOutput, bundleStage, { recursive: true });
+          throwIfAborted(options.signal);
+          if (!(await isBundleReady(bundleStage))) {
+            throw new Error(
+              "Remotion 打包产物不完整：需要非空的 index.html、bundle.js 和 bundle.js.map",
+            );
+          }
+
+          // Complete bundle directories are immutable: deleting one here could
+          // break a renderer that already received its path. A forced rebuild is
+          // therefore installed under a unique sibling when the canonical entry
+          // is healthy. Corrupt/incomplete canonical entries are safe to replace.
+          const destinationReady = await isBundleReady(destination);
+          throwIfAborted(options.signal);
+          if (destinationReady && !options.rebuild) return destination;
+          const installDestination = destinationReady
+            ? path.join(cacheRoot, `bundle-${hash}-rebuild-${id}`)
+            : destination;
+          if (!destinationReady) {
+            await fs.rm(destination, { recursive: true, force: true }).catch(() => {});
+          }
+          throwIfAborted(options.signal);
+          await fs.rename(bundleStage, installDestination);
+          return installDestination;
+        } finally {
+          await fs.rm(publicStage, { recursive: true, force: true }).catch(() => {});
+          await fs.rm(bundleStage, { recursive: true, force: true }).catch(() => {});
+          if (bundlerOutput) {
+            await fs.rm(bundlerOutput, { recursive: true, force: true }).catch(() => {});
+          }
+        }
+      }, { signal: options.signal });
+    }, { signal: options.signal });
+  } catch (error) {
+    // Keep the render API's established cancellation type even when the abort
+    // originated inside the generic file-lock waiter.
+    if (options.signal?.aborted) throwIfAborted(options.signal);
+    throw error;
   }
-  return dest;
 }
 
-// ---- loopback asset server ---------------------------------------------------
-
-type AssetServer = { urls: Record<string, string>; close: () => void };
-
-// Serves the config's file-based assets to the headless browser. Loopback
-// only, ephemeral port, lives for the duration of one render.
-function serveLocalAssets(files: Record<string, LocalFile>): Promise<AssetServer> {
-  const ids = Object.keys(files);
-  if (ids.length === 0) {
-    return Promise.resolve({ urls: {}, close: () => {} });
+async function validateRuntimeSite(site: string): Promise<string> {
+  const absolute = path.resolve(site);
+  if (!(await isBundleReady(absolute))) {
+    throw new Error(
+      `预构建 Remotion 站点无效（需要非空的 index.html、bundle.js 和 bundle.js.map）: ${absolute}`,
+    );
   }
+  return absolute;
+}
+
+export async function resolveRenderServeUrl(params: {
+  root?: string;
+  serveUrl?: string;
+  runtimeSite?: string;
+  cacheDir?: string;
+  rebuild?: boolean;
+  log?: (message: string) => void;
+  signal?: AbortSignal;
+}): Promise<string> {
+  throwIfAborted(params.signal);
+  if (params.serveUrl && params.runtimeSite) {
+    throw new Error("serveUrl 和 runtimeSite 不能同时设置");
+  }
+  if (params.serveUrl) {
+    const value = params.serveUrl.trim();
+    if (!value) throw new Error("serveUrl 不能为空");
+    if (/^https?:\/\//i.test(value) || /^file:\/\//i.test(value)) return value;
+    return validateRuntimeSite(value);
+  }
+  if (params.runtimeSite) return validateRuntimeSite(params.runtimeSite);
+  if (!params.root) throw new Error("缺少渲染站点：请提供 root、serveUrl 或 runtimeSite");
+  return ensureBundle(params.root, {
+    rebuild: params.rebuild,
+    log: params.log,
+    cacheDir: params.cacheDir,
+    signal: params.signal,
+  });
+}
+
+// ---- loopback asset server --------------------------------------------------
+
+export type AssetServer = {
+  urls: Record<string, string>;
+  close: () => Promise<void>;
+};
+
+type ByteRange = { start: number; end: number };
+
+function parseByteRange(header: string | undefined, size: number): ByteRange | "invalid" | null {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match || size <= 0) return "invalid";
+
+  const [, rawStart, rawEnd] = match;
+  if (!rawStart && !rawEnd) return "invalid";
+  if (!rawStart) {
+    const suffixLength = Number(rawEnd);
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return "invalid";
+    return { start: Math.max(0, size - suffixLength), end: size - 1 };
+  }
+
+  const start = Number(rawStart);
+  const requestedEnd = rawEnd ? Number(rawEnd) : size - 1;
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(requestedEnd) ||
+    start < 0 ||
+    start >= size ||
+    requestedEnd < start
+  ) {
+    return "invalid";
+  }
+  return { start, end: Math.min(requestedEnd, size - 1) };
+}
+
+/**
+ * Serves local assets to Chromium without buffering whole videos in memory.
+ * The unguessable token prevents unrelated local pages from discovering files.
+ */
+export function serveLocalAssets(files: Record<string, LocalFile>): Promise<AssetServer> {
+  const ids = Object.keys(files);
+  if (ids.length === 0) return Promise.resolve({ urls: {}, close: async () => {} });
+
   return new Promise((resolve, reject) => {
-    const server = http.createServer(async (req, res) => {
-      const match = /^\/asset\/([^/]+)$/.exec(req.url ?? "");
-      const asset = match ? files[decodeURIComponent(match[1])] : undefined;
-      if (!asset) {
-        res.statusCode = 404;
-        res.end("not found");
+    const token = crypto.randomBytes(24).toString("hex");
+    const sockets = new Set<Socket>();
+    const server = http.createServer(async (request, response) => {
+      if (request.method === "OPTIONS") {
+        response.statusCode = 204;
+        response.setHeader("Access-Control-Allow-Origin", "*");
+        response.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+        response.setHeader("Access-Control-Allow-Headers", "Range");
+        response.end();
         return;
       }
-      try {
-        const buf = await fs.readFile(asset.file);
-        res.setHeader("Content-Type", asset.mime);
-        res.setHeader("Cache-Control", "no-store");
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.end(buf);
-      } catch (e) {
-        res.statusCode = 500;
-        res.end(e instanceof Error ? e.message : "read error");
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        response.statusCode = 405;
+        response.setHeader("Allow", "GET, HEAD, OPTIONS");
+        response.end("method not allowed");
+        return;
       }
+
+      let asset: LocalFile | undefined;
+      try {
+        const url = new URL(request.url ?? "/", "http://127.0.0.1");
+        const match = /^\/asset\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+        if (match && match[1] === token) asset = files[decodeURIComponent(match[2])];
+      } catch {
+        response.statusCode = 400;
+        response.end("bad request");
+        return;
+      }
+      if (!asset) {
+        response.statusCode = 404;
+        response.end("not found");
+        return;
+      }
+
+      const stat = await fs.stat(asset.file).catch(() => null);
+      if (!stat?.isFile()) {
+        response.statusCode = 404;
+        response.end("not found");
+        return;
+      }
+
+      const range = parseByteRange(request.headers.range, stat.size);
+      if (range === "invalid") {
+        response.statusCode = 416;
+        response.setHeader("Content-Range", `bytes */${stat.size}`);
+        response.end();
+        return;
+      }
+
+      const start = range?.start ?? 0;
+      const end = range?.end ?? Math.max(0, stat.size - 1);
+      const length = stat.size === 0 ? 0 : end - start + 1;
+      response.statusCode = range ? 206 : 200;
+      response.setHeader("Content-Type", asset.mime);
+      response.setHeader("Content-Length", length);
+      response.setHeader("Accept-Ranges", "bytes");
+      response.setHeader("Cache-Control", "private, max-age=3600, immutable");
+      response.setHeader("Access-Control-Allow-Origin", "*");
+      if (range) response.setHeader("Content-Range", `bytes ${start}-${end}/${stat.size}`);
+      if (request.method === "HEAD" || stat.size === 0) {
+        response.end();
+        return;
+      }
+
+      const stream = createReadStream(asset.file, { start, end });
+      stream.on("error", () => {
+        if (!response.headersSent) {
+          response.statusCode = 500;
+          response.end("read error");
+        } else {
+          response.destroy();
+        }
+      });
+      response.on("close", () => stream.destroy());
+      stream.pipe(response);
     });
-    server.on("error", reject);
+
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.once("close", () => sockets.delete(socket));
+    });
+    server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      if (!addr || typeof addr !== "object") {
+      const address = server.address();
+      if (!address || typeof address !== "object") {
+        server.close();
         reject(new Error("本地资源服务启动失败"));
         return;
       }
+      server.removeListener("error", reject);
+      // Runtime errors are contained by request handlers; keep an error
+      // listener attached so Node never turns one into an uncaught exception.
+      server.on("error", () => {});
+
       const urls: Record<string, string> = {};
       for (const id of ids) {
-        urls[id] = `http://127.0.0.1:${addr.port}/asset/${encodeURIComponent(id)}`;
+        urls[id] =
+          `http://127.0.0.1:${address.port}/asset/${token}/` + encodeURIComponent(id);
       }
-      resolve({ urls, close: () => server.close() });
+      let closed = false;
+      resolve({
+        urls,
+        close: async () => {
+          if (closed) return;
+          closed = true;
+          await new Promise<void>((done) => {
+            server.close(() => done());
+            for (const socket of sockets) socket.destroy();
+          });
+        },
+      });
     });
   });
 }
 
-// ---- render -------------------------------------------------------------------
+// ---- safe output transactions ----------------------------------------------
 
-export async function renderVideo(params: RenderParams): Promise<RenderOutput> {
-  const { root, config, files, options, outPath, coverPath, onProgress, log } = params;
+type Artifact = { temporaryPath: string; targetPath: string };
 
-  const serveUrl = await ensureBundle(root, { rebuild: params.rebuild, log });
-  const assetServer = await serveLocalAssets(files);
+function isExistsError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "EEXIST"
+  );
+}
+
+async function prepareArtifactTargets(artifacts: Artifact[], overwrite: boolean): Promise<void> {
+  const uniqueTargets = new Set<string>();
+  for (const artifact of artifacts) {
+    artifact.targetPath = path.resolve(artifact.targetPath);
+    if (uniqueTargets.has(artifact.targetPath)) {
+      throw new Error(`多个产物不能写入同一路径: ${artifact.targetPath}`);
+    }
+    uniqueTargets.add(artifact.targetPath);
+    await fs.mkdir(path.dirname(artifact.targetPath), { recursive: true });
+    const existing = await fs.lstat(artifact.targetPath).catch(() => null);
+    if (existing?.isDirectory()) throw new Error(`输出路径是目录: ${artifact.targetPath}`);
+    if (existing && !overwrite) {
+      throw new Error(`输出文件已存在: ${artifact.targetPath}（显式设置 overwrite 才会覆盖）`);
+    }
+  }
+}
+
+/** Installs all rendered files or rolls the whole set back on any failure. */
+export async function commitArtifactsAtomically(
+  artifacts: Artifact[],
+  overwrite = false,
+): Promise<void> {
+  await prepareArtifactTargets(artifacts, overwrite);
+
+  if (!overwrite) {
+    const installed: string[] = [];
+    try {
+      // The temporary file lives beside its target, so a hard link gives us a
+      // true atomic, no-clobber install without copying a potentially huge MP4.
+      for (const artifact of artifacts) {
+        await fs.link(artifact.temporaryPath, artifact.targetPath);
+        installed.push(artifact.targetPath);
+      }
+      await Promise.all(artifacts.map((artifact) => fs.rm(artifact.temporaryPath, { force: true })));
+      return;
+    } catch (error) {
+      await Promise.all(installed.map((target) => fs.rm(target, { force: true }).catch(() => {})));
+      if (isExistsError(error)) {
+        throw new Error("提交产物时发现同名文件；未覆盖任何已有文件", { cause: error });
+      }
+      throw error;
+    }
+  }
+
+  const backups: { target: string; backup: string }[] = [];
+  const installed: string[] = [];
+  try {
+    for (const artifact of artifacts) {
+      const existing = await fs.lstat(artifact.targetPath).catch(() => null);
+      if (!existing) continue;
+      if (existing.isDirectory()) throw new Error(`输出路径是目录: ${artifact.targetPath}`);
+      const backup = temporaryArtifactPath(artifact.targetPath, ".backup");
+      await fs.rename(artifact.targetPath, backup);
+      backups.push({ target: artifact.targetPath, backup });
+    }
+    for (const artifact of artifacts) {
+      await fs.rename(artifact.temporaryPath, artifact.targetPath);
+      installed.push(artifact.targetPath);
+    }
+  } catch (error) {
+    await Promise.all(installed.map((target) => fs.rm(target, { force: true }).catch(() => {})));
+    for (const backup of backups.reverse()) {
+      await fs.rename(backup.backup, backup.target).catch(() => {});
+    }
+    throw error;
+  }
+  await Promise.all(backups.map(({ backup }) => fs.rm(backup, { force: true }).catch(() => {})));
+}
+
+function temporaryArtifactPath(target: string, extension: string): string {
+  const absolute = path.resolve(target);
+  const safeBase = path.basename(absolute).replace(/[^A-Za-z0-9._-]/g, "-") || "output";
+  return path.join(path.dirname(absolute), `.${safeBase}.${randomId()}.partial${extension}`);
+}
+
+// ---- render preparation -----------------------------------------------------
+
+export class RenderCancelledError extends Error {
+  readonly code = "RENDER_CANCELLED";
+
+  constructor(message = "渲染已取消", options?: ErrorOptions) {
+    super(message, options);
+    this.name = "RenderCancelledError";
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new RenderCancelledError("渲染已取消", {
+      cause: signal.reason,
+    });
+  }
+}
+
+function combineCancelSignals(
+  ownSignal: CancelSignal,
+  externalSignal: CancelSignal | undefined,
+): CancelSignal {
+  if (!externalSignal) return ownSignal;
+  return (callback) => {
+    let called = false;
+    const once = () => {
+      if (called) return;
+      called = true;
+      callback();
+    };
+    ownSignal(once);
+    externalSignal(once);
+  };
+}
+
+type PreparedRender = {
+  renderer: typeof import("@remotion/renderer");
+  serveUrl: string;
+  resolved: ResolvedConfig;
+  inputProps: { config: ResolvedConfig };
+  composition: Awaited<ReturnType<typeof import("@remotion/renderer")["selectComposition"]>>;
+  scale: number;
+  common: {
+    chromiumOptions: { gl: ChromiumGlRenderer; enableMultiProcessOnLinux?: boolean };
+    logLevel: LogLevel;
+    browserExecutable?: string;
+    binariesDirectory?: string;
+    licenseKey?: string;
+  };
+  cancelSignal: CancelSignal;
+  runRenderer: <T>(work: () => Promise<T>) => Promise<T>;
+  close: () => Promise<void>;
+};
+
+type RendererLogContext = {
+  logLevel: LogLevel;
+  log?: (message: string) => void;
+};
+
+const rendererLogStorage = new AsyncLocalStorage<RendererLogContext>();
+const configuredRenderers = new WeakSet<object>();
+const logLevelRank: Record<LogLevel, number> = {
+  trace: 0,
+  verbose: 1,
+  info: 2,
+  warn: 3,
+  error: 4,
+};
+let consoleRoutingConfigured = false;
+
+function emitRendererLog(context: RendererLogContext, message: string): void {
+  if (!context.log) return;
+  // A caller may itself use console.log as the log sink. Exit the renderer
+  // context to avoid recursion and to honor that explicit caller choice.
+  rendererLogStorage.exit(() => context.log?.(message));
+}
+
+function configureRendererConsoleRouting(): void {
+  if (consoleRoutingConfigured) return;
+  consoleRoutingConfigured = true;
+
+  const route = (
+    level: LogLevel,
+    original: (...args: unknown[]) => void,
+    args: unknown[],
+  ): void => {
+    const context = rendererLogStorage.getStore();
+    if (!context) {
+      original(...args);
+      return;
+    }
+    if (logLevelRank[level] < logLevelRank[context.logLevel]) return;
+    emitRendererLog(context, formatLog(...args));
+  };
+
+  const originalLog = console.log.bind(console);
+  const originalInfo = console.info.bind(console);
+  const originalDebug = console.debug.bind(console);
+  const originalWarn = console.warn.bind(console);
+  const originalError = console.error.bind(console);
+  console.log = (...args: unknown[]) => route("info", originalLog, args);
+  console.info = (...args: unknown[]) => route("info", originalInfo, args);
+  console.debug = (...args: unknown[]) => route("verbose", originalDebug, args);
+  console.warn = (...args: unknown[]) => route("warn", originalWarn, args);
+  console.error = (...args: unknown[]) => route("error", originalError, args);
+}
+
+function configureRendererLogging(renderer: typeof import("@remotion/renderer")): void {
+  configureRendererConsoleRouting();
+  if (configuredRenderers.has(renderer.RenderInternals)) return;
+  configuredRenderers.add(renderer.RenderInternals);
+
+  // Remotion's default browser-log adapter uses each browser event's severity
+  // as its own threshold. This can send WebGL info messages to stdout even
+  // when the API was called with logLevel="error". Route those events through
+  // an async-local sink so concurrent renders stay isolated and stdout remains
+  // a machine-only channel.
+  renderer.RenderInternals.defaultOnLog = ({ logLevel, tag, previewString }) => {
+    const context = rendererLogStorage.getStore();
+    if (!context || logLevelRank[logLevel] < logLevelRank[context.logLevel]) return;
+    emitRendererLog(context, `${tag ? `[${tag}] ` : ""}${previewString}`);
+  };
+}
+
+async function prepareRender(params: RenderBaseParams): Promise<PreparedRender> {
+  throwIfAborted(params.signal);
+  const serveUrl = await resolveRenderServeUrl(params);
+  throwIfAborted(params.signal);
+  const assetServer = await serveLocalAssets(params.files);
+  const renderer = await import("@remotion/renderer");
+  configureRendererLogging(renderer);
+  const ownCancellation = renderer.makeCancelSignal();
+  const onAbort = () => ownCancellation.cancel();
+  params.signal?.addEventListener("abort", onAbort, { once: true });
+
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    params.signal?.removeEventListener("abort", onAbort);
+    await assetServer.close();
+  };
 
   try {
-    // fps rides in the config so calculateMetadata derives a matching
-    // durationInFrames; crf/scale are encoder-only (same as the app paths).
-    const resolved = {
-      ...resolveConfig(config, assetServer.urls),
-      canvas: { ...config.canvas, fps: options.fps },
+    const baseResolved = resolveConfig(params.config, assetServer.urls);
+    const resolved: ResolvedConfig = {
+      ...baseResolved,
+      canvas: { ...baseResolved.canvas, fps: params.options.fps },
     };
     const inputProps = { config: resolved };
-    const scale = scaleFor(options.resolution);
-    const chromiumOptions = { gl: "angle" as const };
+    const logLevel = params.logLevel ?? "error";
+    const browserExecutable =
+      params.browserExecutable ?? process.env.REMOTION_BROWSER_EXECUTABLE ?? undefined;
+    const binariesDirectory =
+      params.binariesDirectory ?? process.env.REMOTION_BINARIES_DIR ?? undefined;
+    const licenseKey = process.env.REMOTION_LICENSE_KEY?.trim() || undefined;
+    const common: PreparedRender["common"] = {
+      chromiumOptions: {
+        gl: resolveChromiumGlRenderer(),
+        ...(process.platform === "linux" ? { enableMultiProcessOnLinux: true } : {}),
+      },
+      logLevel,
+      ...(browserExecutable ? { browserExecutable } : {}),
+      ...(binariesDirectory ? { binariesDirectory } : {}),
+      ...(licenseKey ? { licenseKey } : {}),
+    };
+    const runRenderer = <T>(work: () => Promise<T>): Promise<T> =>
+      rendererLogStorage.run({ logLevel, log: params.log }, work);
 
-    const { ensureBrowser, selectComposition, renderMedia, renderStill } =
-      await import("@remotion/renderer");
+    params.log?.("正在启动无头浏览器…");
+    await runRenderer(() =>
+      renderer.ensureBrowser({
+        logLevel,
+        ...(browserExecutable ? { browserExecutable } : {}),
+      }),
+    );
+    throwIfAborted(params.signal);
 
-    log?.("准备无头浏览器（首次运行会下载 Chromium）…");
-    await ensureBrowser();
+    const composition = await runRenderer(() =>
+      renderer.selectComposition({
+        serveUrl,
+        id: "Teleprompter",
+        inputProps,
+        ...common,
+      }),
+    );
+    throwIfAborted(params.signal);
 
-    const composition = await selectComposition({
+    return {
+      renderer,
       serveUrl,
-      id: "Teleprompter",
+      resolved,
       inputProps,
-      chromiumOptions,
-    });
+      composition,
+      scale: scaleFor(params.options.resolution),
+      common,
+      cancelSignal: combineCancelSignals(ownCancellation.cancelSignal, params.cancelSignal),
+      runRenderer,
+      close,
+    };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
 
-    const durationSec = totalSec(resolved);
-    log?.(
-      `开始渲染: ${Math.round(durationSec)} 秒 · ${options.resolution} · ${options.fps}fps · 画质 ${options.quality}`,
+function normalizeRenderError(
+  error: unknown,
+  signal?: AbortSignal,
+): unknown {
+  const message =
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string"
+      ? error.message
+      : "";
+  if (signal?.aborted || /render(?:Media|Still|Frames)\(\) got cancelled/.test(message)) {
+    return new RenderCancelledError("渲染已取消", { cause: error });
+  }
+  return error;
+}
+
+function frameForScene(config: ResolvedConfig, scene: StillScene): number {
+  if (scene === "opening") return 0;
+  if (scene === "content") return openingFrames(config);
+  return openingFrames(config) + contentFrames(config);
+}
+
+function validateFrame(frame: number, durationInFrames: number): void {
+  if (!Number.isInteger(frame) || frame < 0 || frame >= durationInFrames) {
+    throw new Error(`静帧位置超出范围: ${frame}（有效范围 0-${durationInFrames - 1}）`);
+  }
+}
+
+// ---- public render API ------------------------------------------------------
+
+export async function renderVideo(params: RenderParams): Promise<RenderOutput> {
+  const videoTarget = path.resolve(params.outPath);
+  const coverTarget = params.coverPath ? path.resolve(params.coverPath) : undefined;
+  const videoTemporary = temporaryArtifactPath(videoTarget, ".mp4");
+  const coverTemporary = coverTarget ? temporaryArtifactPath(coverTarget, ".jpg") : undefined;
+  const artifacts: Artifact[] = [
+    { temporaryPath: videoTemporary, targetPath: videoTarget },
+    ...(coverTarget && coverTemporary
+      ? [{ temporaryPath: coverTemporary, targetPath: coverTarget }]
+      : []),
+  ];
+  await prepareArtifactTargets(artifacts, params.overwrite === true);
+
+  let prepared: PreparedRender | undefined;
+  try {
+    prepared = await prepareRender(params);
+    const durationSec = totalSec(prepared.resolved);
+    params.log?.(
+      `开始渲染: ${Math.round(durationSec)} 秒 · ${params.options.resolution} · ${params.options.fps}fps · 画质 ${params.options.quality}`,
     );
 
-    await fs.mkdir(path.dirname(path.resolve(outPath)), { recursive: true });
-    await renderMedia({
-      serveUrl,
-      composition,
-      codec: "h264",
-      crf: crfFor(options.quality),
-      scale,
-      outputLocation: outPath,
-      inputProps,
-      chromiumOptions,
-      onProgress: ({ progress }: { progress: number }) => onProgress?.(progress),
-    });
+    await prepared.runRenderer(() =>
+      prepared!.renderer.renderMedia({
+        serveUrl: prepared!.serveUrl,
+        composition: prepared!.composition,
+        codec: "h264",
+        crf: crfFor(params.options.quality),
+        scale: prepared!.scale,
+        outputLocation: videoTemporary,
+        overwrite: false,
+        inputProps: prepared!.inputProps,
+        cancelSignal: prepared!.cancelSignal,
+        onProgress: ({ progress }: { progress: number }) => params.onProgress?.(progress),
+        ...prepared!.common,
+      }),
+    );
+    throwIfAborted(params.signal);
 
-    if (coverPath) {
-      // Cover = first frame (closed curtain), matching the app pipeline.
-      await fs.mkdir(path.dirname(path.resolve(coverPath)), { recursive: true });
-      await renderStill({
-        serveUrl,
-        composition,
-        frame: 0,
-        output: coverPath,
-        inputProps,
-        imageFormat: "jpeg",
-        jpegQuality: 90,
-        scale,
-        chromiumOptions,
-      });
+    const media = await probeMedia(videoTemporary);
+    if (
+      media.videoCodec === null ||
+      media.width === null ||
+      media.height === null ||
+      media.durationSec === null ||
+      media.durationSec <= 0
+    ) {
+      throw new Error("渲染产物校验失败：MP4 缺少有效视频轨或时长");
     }
 
-    return { outputPath: outPath, coverPath, durationSec };
+    if (coverTemporary) {
+      await prepared.runRenderer(() =>
+        prepared!.renderer.renderStill({
+          serveUrl: prepared!.serveUrl,
+          composition: prepared!.composition,
+          frame: 0,
+          output: coverTemporary,
+          overwrite: false,
+          inputProps: prepared!.inputProps,
+          imageFormat: "jpeg",
+          jpegQuality: 90,
+          scale: prepared!.scale,
+          cancelSignal: prepared!.cancelSignal,
+          ...prepared!.common,
+        }),
+      );
+      throwIfAborted(params.signal);
+    }
+
+    await commitArtifactsAtomically(artifacts, params.overwrite === true);
+    return {
+      outputPath: videoTarget,
+      coverPath: coverTarget,
+      durationSec,
+      media: { ...media, path: videoTarget },
+    };
+  } catch (error) {
+    throw prepared ? normalizeRenderError(error, params.signal) : error;
   } finally {
-    assetServer.close();
+    await prepared?.close();
+    await Promise.all(
+      [videoTemporary, coverTemporary]
+        .filter((file): file is string => Boolean(file))
+        .map((file) => fs.rm(file, { force: true }).catch(() => {})),
+    );
+  }
+}
+
+export async function renderStill(params: RenderStillParams): Promise<RenderStillOutput> {
+  if (params.frame !== undefined && params.scene !== undefined) {
+    throw new Error("frame 和 scene 不能同时设置");
+  }
+  const format = params.imageFormat ??
+    (path.extname(params.outPath).toLowerCase() === ".png" ? "png" : "jpeg");
+  const target = path.resolve(params.outPath);
+  const temporary = temporaryArtifactPath(target, format === "png" ? ".png" : ".jpg");
+  const artifacts = [{ temporaryPath: temporary, targetPath: target }];
+  await prepareArtifactTargets(artifacts, params.overwrite === true);
+
+  let prepared: PreparedRender | undefined;
+  try {
+    prepared = await prepareRender(params);
+    const scene = params.frame === undefined ? (params.scene ?? "opening") : null;
+    const frame = params.frame ?? frameForScene(prepared.resolved, scene ?? "opening");
+    validateFrame(frame, prepared.composition.durationInFrames);
+
+    await prepared.runRenderer(() =>
+      prepared!.renderer.renderStill({
+        serveUrl: prepared!.serveUrl,
+        composition: prepared!.composition,
+        frame,
+        output: temporary,
+        overwrite: false,
+        inputProps: prepared!.inputProps,
+        imageFormat: format,
+        ...(format === "jpeg" ? { jpegQuality: params.jpegQuality ?? 90 } : {}),
+        scale: prepared!.scale,
+        cancelSignal: prepared!.cancelSignal,
+        ...prepared!.common,
+      }),
+    );
+    throwIfAborted(params.signal);
+    await commitArtifactsAtomically(artifacts, params.overwrite === true);
+    return { outputPath: target, frame, scene };
+  } catch (error) {
+    throw prepared ? normalizeRenderError(error, params.signal) : error;
+  } finally {
+    await prepared?.close();
+    await fs.rm(temporary, { force: true }).catch(() => {});
+  }
+}
+
+export async function renderSceneStills(
+  params: RenderSceneStillsParams,
+): Promise<RenderSceneStillsOutput> {
+  const scenes = params.scenes ?? ["opening", "content", "ending"];
+  if (scenes.length === 0) throw new Error("至少需要一个静帧场景");
+  if (new Set(scenes).size !== scenes.length) throw new Error("静帧场景不能重复");
+  const format = params.imageFormat ?? "jpeg";
+  const extension = format === "png" ? ".png" : ".jpg";
+  const outDir = path.resolve(params.outDir);
+  const jobs = scenes.map((scene) => {
+    const targetPath = path.join(outDir, `${scene}${extension}`);
+    return {
+      scene,
+      artifact: {
+        targetPath,
+        temporaryPath: temporaryArtifactPath(targetPath, extension),
+      },
+    };
+  });
+  await prepareArtifactTargets(
+    jobs.map((job) => job.artifact),
+    params.overwrite === true,
+  );
+
+  let prepared: PreparedRender | undefined;
+  try {
+    prepared = await prepareRender(params);
+    for (const job of jobs) {
+      const frame = frameForScene(prepared.resolved, job.scene);
+      validateFrame(frame, prepared.composition.durationInFrames);
+      await prepared.runRenderer(() =>
+        prepared!.renderer.renderStill({
+          serveUrl: prepared!.serveUrl,
+          composition: prepared!.composition,
+          frame,
+          output: job.artifact.temporaryPath,
+          overwrite: false,
+          inputProps: prepared!.inputProps,
+          imageFormat: format,
+          ...(format === "jpeg" ? { jpegQuality: params.jpegQuality ?? 90 } : {}),
+          scale: prepared!.scale,
+          cancelSignal: prepared!.cancelSignal,
+          ...prepared!.common,
+        }),
+      );
+      throwIfAborted(params.signal);
+    }
+
+    await commitArtifactsAtomically(
+      jobs.map((job) => job.artifact),
+      params.overwrite === true,
+    );
+    const outputs: Partial<Record<StillScene, RenderStillOutput>> = {};
+    for (const job of jobs) {
+      outputs[job.scene] = {
+        outputPath: job.artifact.targetPath,
+        frame: frameForScene(prepared.resolved, job.scene),
+        scene: job.scene,
+      };
+    }
+    return { outputs };
+  } catch (error) {
+    throw prepared ? normalizeRenderError(error, params.signal) : error;
+  } finally {
+    await prepared?.close();
+    await Promise.all(
+      jobs.map((job) => fs.rm(job.artifact.temporaryPath, { force: true }).catch(() => {})),
+    );
   }
 }
