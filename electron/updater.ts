@@ -3,14 +3,16 @@
 // ships in the client; the private source repo stays private. See
 // electron-builder.yml `publish:` for the matching provider config.
 //
-// Behaviour: download new versions in the background, then prompt for a restart
-// only when the app is idle — never while an export is rendering. As a safety
-// net, a downloaded update also installs on the next normal quit.
+// Behaviour: download new versions in the background, then require a restart
+// as soon as the app is idle — never while an export is rendering. There is no
+// deferral path: after the one-button notice closes, the update is installed.
+// As a safety net, a downloaded update also installs on the next normal quit.
 import { app, dialog, type BrowserWindow } from "electron";
 import { autoUpdater } from "electron-updater";
 import { isRendering } from "./render";
 
 const SIX_HOURS = 6 * 60 * 60 * 1000;
+const IDLE_RETRY_MS = 5_000;
 
 export function initAutoUpdate(getWindow: () => BrowserWindow | null): void {
   // Unpackaged dev runs have no app-update.yml; updates are macOS-only here.
@@ -22,28 +24,24 @@ export function initAutoUpdate(getWindow: () => BrowserWindow | null): void {
   let pending = false; // an update is downloaded and waiting to install
   let dialogOpen = false; // guard against overlapping prompts
 
-  const maybePrompt = async (): Promise<void> => {
+  const maybeInstall = async (): Promise<void> => {
     if (!pending || dialogOpen || isRendering()) return; // wait for an idle moment
     dialogOpen = true;
     try {
       const win = getWindow();
       const opts = {
         type: "info" as const,
-        buttons: ["立即重启更新", "稍后"],
+        buttons: ["立即重启更新"],
         defaultId: 0,
-        cancelId: 1,
-        message: "新版本已就绪",
-        detail: "已在后台下载完成，重启应用即可更新。",
+        cancelId: 0,
+        noLink: true,
+        message: "必须更新后才能继续使用",
+        detail: "新版本已在后台下载完成。应用将立即重启并完成更新。",
       };
-      const { response } = win
-        ? await dialog.showMessageBox(win, opts)
-        : await dialog.showMessageBox(opts);
-      if (response === 0) {
-        pending = false;
-        autoUpdater.quitAndInstall();
-      }
-      // Otherwise keep `pending`; we re-offer on the next interval tick, and
-      // autoInstallOnAppQuit still applies it when the user quits normally.
+      if (win) await dialog.showMessageBox(win, opts);
+      else await dialog.showMessageBox(opts);
+      pending = false;
+      autoUpdater.quitAndInstall();
     } finally {
       dialogOpen = false;
     }
@@ -51,7 +49,7 @@ export function initAutoUpdate(getWindow: () => BrowserWindow | null): void {
 
   autoUpdater.on("update-downloaded", () => {
     pending = true;
-    void maybePrompt();
+    void maybeInstall();
   });
   autoUpdater.on("error", (err) => {
     console.error("[auto-update]", err);
@@ -62,10 +60,10 @@ export function initAutoUpdate(getWindow: () => BrowserWindow | null): void {
   };
 
   // First check shortly after launch (let the window settle), then periodically.
-  // Each tick also retries a deferred prompt in case an export was running before.
   setTimeout(check, 10_000);
-  setInterval(() => {
-    check();
-    void maybePrompt();
-  }, SIX_HOURS);
+  setInterval(check, SIX_HOURS);
+
+  // A downloaded update may arrive during an export. Retry frequently so the
+  // mandatory restart happens promptly once rendering becomes idle.
+  setInterval(() => void maybeInstall(), IDLE_RETRY_MS);
 }
