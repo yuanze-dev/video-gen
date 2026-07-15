@@ -11,7 +11,9 @@ publish:
   - provider: github
     owner: yuanze-dev
     repo: video-gen
-    releaseType: release # publish immediately (not draft) so clients see updates
+    # CI pre-creates exactly one draft. Keep every asset private until the
+    # workflow has verified the complete auto-update set and publishes it.
+    releaseType: draft
 
 directories:
   output: release
@@ -124,6 +126,9 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  # build/notarize.cjs owns the single notarize + staple pass. Without this,
+  # electron-builder submits once and the afterSign hook submits a second time.
+  notarize: false
 
 # Drag-to-install window: branded background, app icon on the left, an arrow,
 # and the /Applications alias on the right.

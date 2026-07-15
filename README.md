@@ -83,6 +83,8 @@ npm run dev
 
 无需打开编辑器即可创建、校验、预览和渲染视频：
 
+Electron 桌面版可直接从顶栏点击 `CLI` → `安装 CLI`：安装器会把随 App 分发的受控启动器写入 `~/.local/bin`，按需配置新终端的 `PATH`，并在完成前执行版本自检；遇到已有同名命令、非稳定 App 路径或 shell 配置竞态时会停止并保留原内容，不要求管理员权限，也不会联网下载 CLI。
+
 ```bash
 npm run cli -- version --json
 npm run cli -- init video.json --minimal
@@ -153,12 +155,14 @@ macOS DMG（Apple Silicon）通过 electron-builder 产出，配置见 [`electro
 
 - UI 远程加载，桌面包体仅含 Electron 主/预载 bundle + `@remotion/renderer` 及其原生 compositor，`chrome-headless-shell` 随 `extraResources` 一并附带。
 - 桌面更新在后台下载；下载完成后会等待当前导出完成，并由用户保存或明确放弃产物，再强制要求重启安装，不提供“稍后”入口。线上 UI 仅在对应签名版本已发布后，才会阻断能力过旧的客户端。
-- 签名使用本地 *Developer ID Application* 证书（从钥匙串自动发现），开启 Hardened Runtime。
-- 公证由 `NOTARIZE` 环境变量控制（见 `build/notarize.cjs`）；缺省凭据时 `afterSign` 钩子为 no-op，仅做签名构建。
+- 签名使用 *Developer ID Application* 证书，开启 Hardened Runtime；生产凭据保存在 GitHub Actions Secrets。
+- 公证与 staple 统一由 `build/notarize.cjs` 完成；缺少 Apple 凭据时仅允许本地签名构建。
 
 ```bash
 npm run electron:build
 ```
+
+生产发布只通过 [`.github/workflows/release.yml`](.github/workflows/release.yml) 的 `v*` tag 流程完成：tag 必须与 `package.json` 版本一致并指向 `main` 中的提交；内置素材权利清单不得残留待确认项，仓库变量 `CLI_DISTRIBUTION_APPROVED` 也必须在 Remotion 与第三方许可复核后设为 `true`。流水线会预建唯一 draft、完成签名/公证、核对 DMG、ZIP、blockmap 与 `latest-mac.yml` 后才公开 Release，禁止用手动 workflow 绕过这些门禁。
 
 ---
 

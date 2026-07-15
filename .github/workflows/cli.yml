@@ -21,13 +21,17 @@ on:
       - "components/editor/TopBar.tsx"
       - "electron/**"
       - "electron-builder.yml"
-      - "build/verify-cli-resource.cjs"
+      - "build/**"
+      - "public/assets/**"
+      - "scripts/build-remotion-site.mjs"
+      - "scripts/ensure-chrome.mjs"
       - "tsconfig.electron.json"
       - "package.json"
       - "package-lock.json"
       - "Dockerfile.cli"
       - ".dockerignore"
       - ".github/workflows/cli.yml"
+      - ".github/workflows/release.yml"
   push:
     branches: [main]
     paths:
@@ -47,13 +51,17 @@ on:
       - "components/editor/TopBar.tsx"
       - "electron/**"
       - "electron-builder.yml"
-      - "build/verify-cli-resource.cjs"
+      - "build/**"
+      - "public/assets/**"
+      - "scripts/build-remotion-site.mjs"
+      - "scripts/ensure-chrome.mjs"
       - "tsconfig.electron.json"
       - "package.json"
       - "package-lock.json"
       - "Dockerfile.cli"
       - ".dockerignore"
       - ".github/workflows/cli.yml"
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: read
@@ -113,6 +121,11 @@ jobs:
       - run: npm run test:desktop
       - run: npm run build:cli
       - run: npm run build:electron
+      - run: node scripts/ensure-chrome.mjs
+      - name: Package app and verify embedded CLI resources
+        run: npx electron-builder --mac dir --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
   packaged-render:
     name: Packaged headless render · Linux · Node 20
@@ -179,3 +192,4 @@ jobs:
           name: littlestart-cli-package
           path: .artifacts/*.tgz
           if-no-files-found: error
+          include-hidden-files: true

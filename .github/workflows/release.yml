@@ -1,12 +1,16 @@
 name: Release (macOS)
 
-# Push a version tag (e.g. v0.1.1) to build, sign, notarize and publish the dmg.
-# Recommended flow:  npm version patch  &&  git push --follow-tags
+# Push a version tag on main (e.g. v0.2.3) to build, sign, notarize and publish.
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
+
+concurrency:
+  # Every production tag shares one lane. Version-specific groups allow an
+  # older, slower build to publish after a newer tag and steal /releases/latest.
+  group: release-macos-production
+  cancel-in-progress: false
 
 permissions:
   contents: write # create/upload the GitHub Release (auto-update feed) in this repo
@@ -14,8 +18,11 @@ permissions:
 jobs:
   build-mac:
     runs-on: macos-14 # Apple Silicon (arm64)
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Fail fast with a clear message if signing/notarization secrets are absent.
       # (GitHub passes unset secrets as empty strings, which makes electron-builder
@@ -43,17 +50,72 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Verify tag matches package version
-        if: github.ref_type == 'tag'
+      - name: Verify release source and approval gates
+        env:
+          CLI_DISTRIBUTION_APPROVED: ${{ vars.CLI_DISTRIBUTION_APPROVED }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::Production releases must run from a version tag"
+            exit 1
+          fi
           EXPECTED="v$(node -p "require('./package.json').version")"
           if [ "$GITHUB_REF_NAME" != "$EXPECTED" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match package version $EXPECTED"
             exit 1
           fi
+          git fetch origin main:refs/remotes/origin/main --no-tags
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Release tag must point to a commit contained in origin/main"
+            exit 1
+          fi
+          PUBLIC_TAGS="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')"
+          TARGET_TAG="$GITHUB_REF_NAME" PUBLIC_TAGS="$PUBLIC_TAGS" node <<'NODE'
+          const parseStable = (tag) => {
+            const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+            return match ? match.slice(1).map(Number) : null;
+          };
+          const compare = (left, right) => {
+            for (let index = 0; index < 3; index += 1) {
+              if (left[index] !== right[index]) return left[index] - right[index];
+            }
+            return 0;
+          };
+          const targetTag = process.env.TARGET_TAG;
+          const target = parseStable(targetTag);
+          if (!target) throw new Error(`Production tag must be stable semver: ${targetTag}`);
+          const publicTags = (process.env.PUBLIC_TAGS ?? "").split(/\r?\n/).filter(Boolean);
+          const blockingTag = publicTags.find((tag) => {
+            const parsed = parseStable(tag);
+            return parsed && compare(parsed, target) >= 0;
+          });
+          if (blockingTag) {
+            throw new Error(
+              `Release ${targetTag} must be newer than every public stable release; found ${blockingTag}`,
+            );
+          }
+          NODE
+          if grep -Eq '^\| .* \| `REQUIRES_CONFIRMATION` \|$' ASSET_RIGHTS.md; then
+            echo "::error::Bundled media distribution rights are still unconfirmed"
+            exit 1
+          fi
+          cmp -s ASSET_RIGHTS.md packages/littlestart-cli/ASSET_RIGHTS.md || {
+            echo "::error::Packaged asset-rights inventory is out of sync"
+            exit 1
+          }
+          cmp -s THIRD_PARTY_NOTICES.md packages/littlestart-cli/THIRD_PARTY_NOTICES.md || {
+            echo "::error::Packaged third-party notices are out of sync"
+            exit 1
+          }
+          if [ "$CLI_DISTRIBUTION_APPROVED" != "true" ]; then
+            echo "::error::Set repository variable CLI_DISTRIBUTION_APPROVED=true after Remotion and third-party review"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Ensure headless Chromium (chrome-headless-shell)
         run: node scripts/ensure-chrome.mjs
@@ -61,10 +123,43 @@ jobs:
       - name: Build CLI, Remotion site + Electron bundles
         run: |
           npm run build:remotion-site
+          npx tsc --noEmit
+          npm run test:cli
+          npm run test:cli:repro
+          npm run test:skills
           npm run build:cli
           npm run typecheck:electron
           npm run test:desktop
           npm run build:electron
+          npm audit --omit=dev --audit-level=high
+
+      - name: Prepare unique draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$GITHUB_REF_NAME"
+          MATCHES="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -c --arg VERSION "$VERSION" '[.[][] | select(.tag_name == $VERSION)]')"
+          COUNT="$(jq 'length' <<<"$MATCHES")"
+          if [ "$COUNT" -gt 1 ]; then
+            echo "::error::Found $COUNT release objects for $VERSION"
+            exit 1
+          fi
+          if [ "$COUNT" -eq 1 ]; then
+            IS_DRAFT="$(jq -r '.[0].draft' <<<"$MATCHES")"
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::Refusing to overwrite an already-public release for $VERSION"
+              exit 1
+            fi
+            # electron-publish only searches the first Releases API page. A
+            # very old draft can therefore be invisible to it even though our
+            # paginated guard found it. Recreate the draft so this run always
+            # uploads into one current, empty release object.
+            RELEASE_ID="$(jq -r '.[0].id' <<<"$MATCHES")"
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"
+          fi
+          gh release create "$VERSION" --verify-tag --draft --title "$VERSION" --generate-notes
 
       # One step does it all now that auto-update is in play:
       #   • CSC_*  → sign the .app with the Developer ID cert (CSC_LINK = base64 .p12)
@@ -86,21 +181,160 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: npx electron-builder --mac --publish always
 
-      # Depending on the electron-builder version/provider settings, the release
-      # may already be public or may still be a draft. Publish only when needed,
-      # then drop the redundant package-name zip electron-builder may emit
-      # alongside the littlestart-*.zip referenced by latest-mac.yml.
-      - name: Finalize release (publish + tidy)
+      # Keep the release private until every updater asset is present and the
+      # manifest names the package version. This also prevents partial releases
+      # from becoming the /releases/latest auto-update feed.
+      - name: Verify and publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           RAW="$(node -p "require('./package.json').version")"
-          VERSION="v$RAW"
-          IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"
-          if [ "$IS_DRAFT" = "true" ]; then
-            gh release edit "$VERSION" --draft=false
-          elif [ "$IS_DRAFT" != "false" ]; then
-            echo "::error::Unexpected isDraft value for $VERSION: $IS_DRAFT"
+          VERSION="$GITHUB_REF_NAME"
+          COUNT="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq --arg VERSION "$VERSION" '[.[][] | select(.tag_name == $VERSION)] | length')"
+          if [ "$COUNT" -ne 1 ]; then
+            echo "::error::Expected one release object for $VERSION, found $COUNT"
             exit 1
           fi
+          IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "::error::Release $VERSION became public before verification"
+            exit 1
+          fi
+          PUBLIC_TAGS="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')"
+          TARGET_TAG="$VERSION" PUBLIC_TAGS="$PUBLIC_TAGS" node <<'NODE'
+          const parseStable = (tag) => {
+            const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(tag);
+            return match ? match.slice(1).map(Number) : null;
+          };
+          const compare = (left, right) => {
+            for (let index = 0; index < 3; index += 1) {
+              if (left[index] !== right[index]) return left[index] - right[index];
+            }
+            return 0;
+          };
+          const targetTag = process.env.TARGET_TAG;
+          const target = parseStable(targetTag);
+          if (!target) throw new Error(`Production tag must be stable semver: ${targetTag}`);
+          const publicTags = (process.env.PUBLIC_TAGS ?? "").split(/\r?\n/).filter(Boolean);
+          const blockingTag = publicTags.find((tag) => {
+            const parsed = parseStable(tag);
+            return parsed && compare(parsed, target) >= 0;
+          });
+          if (blockingTag) {
+            throw new Error(
+              `Refusing to publish ${targetTag}; public release ${blockingTag} is not older`,
+            );
+          }
+          NODE
           gh release delete-asset "$VERSION" "video-gen-$RAW-arm64-mac.zip" --yes || true
+          gh release delete-asset "$VERSION" "littlestart-$RAW-arm64.dmg.blockmap" --yes || true
+          ZIP_NAME="littlestart-$RAW-arm64-mac.zip"
+          DMG_NAME="littlestart-$RAW-arm64.dmg"
+          EXPECTED_ASSETS="$(printf '%s\n' \
+            latest-mac.yml \
+            "$ZIP_NAME" \
+            "$ZIP_NAME.blockmap" \
+            "$DMG_NAME" | LC_ALL=C sort)"
+          ACTUAL_ASSETS="$(gh release view "$VERSION" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
+          if [ "$ACTUAL_ASSETS" != "$EXPECTED_ASSETS" ]; then
+            echo "::error::Release assets do not match the exact updater set"
+            echo "Expected:"
+            printf '%s\n' "$EXPECTED_ASSETS"
+            echo "Actual:"
+            printf '%s\n' "$ACTUAL_ASSETS"
+            exit 1
+          fi
+          for ASSET in \
+            latest-mac.yml \
+            "$ZIP_NAME" \
+            "$ZIP_NAME.blockmap" \
+            "$DMG_NAME"; do
+            SIZE="$(gh release view "$VERSION" --json assets --jq ".assets[] | select(.name == \"$ASSET\") | .size")"
+            if [ -z "$SIZE" ] || [ "$SIZE" -le 0 ]; then
+              echo "::error::Missing or empty release asset: $ASSET"
+              exit 1
+            fi
+          done
+          VERIFY_DIR="$RUNNER_TEMP/release-verify"
+          rm -rf "$VERIFY_DIR"
+          mkdir -p "$VERIFY_DIR"
+          gh release download "$VERSION" --pattern latest-mac.yml --dir "$VERIFY_DIR"
+          gh release download "$VERSION" --pattern "$ZIP_NAME" --dir "$VERIFY_DIR"
+          gh release download "$VERSION" --pattern "$DMG_NAME" --dir "$VERIFY_DIR"
+          VERIFY_DIR="$VERIFY_DIR" RAW="$RAW" ZIP_NAME="$ZIP_NAME" DMG_NAME="$DMG_NAME" node <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const yaml = require("js-yaml");
+
+          const fail = (message) => {
+            throw new Error(`Invalid latest-mac.yml: ${message}`);
+          };
+
+          const verify = async () => {
+            const directory = process.env.VERIFY_DIR;
+            const rawVersion = process.env.RAW;
+            const zipName = process.env.ZIP_NAME;
+            const dmgName = process.env.DMG_NAME;
+            const manifest = yaml.load(
+              fs.readFileSync(path.join(directory, "latest-mac.yml"), "utf8"),
+            );
+            if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+              fail("root must be a mapping");
+            }
+            if (String(manifest.version) !== rawVersion) {
+              fail(`version must be ${rawVersion}`);
+            }
+            if (manifest.path !== zipName) fail(`path must be ${zipName}`);
+            if (!Array.isArray(manifest.files) || manifest.files.length !== 2) {
+              fail("files must contain exactly the updater ZIP and DMG");
+            }
+            const filesByUrl = new Map();
+            for (const file of manifest.files) {
+              if (!file || typeof file !== "object" || typeof file.url !== "string") {
+                fail("every files entry must be a mapping with a URL");
+              }
+              if (filesByUrl.has(file.url)) fail(`duplicate files URL: ${file.url}`);
+              filesByUrl.set(file.url, file);
+            }
+            if (
+              filesByUrl.size !== 2 ||
+              !filesByUrl.has(zipName) ||
+              !filesByUrl.has(dmgName)
+            ) {
+              fail(`files URLs must be exactly ${zipName} and ${dmgName}`);
+            }
+            let zipDigest;
+            for (const artifactName of [zipName, dmgName]) {
+              const file = filesByUrl.get(artifactName);
+              const artifactPath = path.join(directory, artifactName);
+              const size = fs.statSync(artifactPath).size;
+              if (!Number.isSafeInteger(file.size) || file.size !== size) {
+                fail(`${artifactName} size does not match the uploaded asset (${size})`);
+              }
+              const digest = await new Promise((resolve, reject) => {
+                const hash = crypto.createHash("sha512");
+                const stream = fs.createReadStream(artifactPath);
+                stream.on("data", (chunk) => hash.update(chunk));
+                stream.on("error", reject);
+                stream.on("end", () => resolve(hash.digest("base64")));
+              });
+              if (file.sha512 !== digest) {
+                fail(`${artifactName} sha512 does not match the uploaded asset`);
+              }
+              if (artifactName === zipName) zipDigest = digest;
+            }
+            if (manifest.sha512 !== zipDigest) {
+              fail("top-level sha512 does not match the uploaded ZIP");
+            }
+          };
+
+          verify().catch((error) => {
+            console.error(`::error::${error instanceof Error ? error.message : String(error)}`);
+            process.exitCode = 1;
+          });
+          NODE
+          gh release edit "$VERSION" --draft=false --latest
