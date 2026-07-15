@@ -54,7 +54,7 @@ const reservations = new Map<string, number>();
 export const getJob = (id: string): Job | undefined => jobs.get(id);
 
 // A session remains active through rendering AND the user's save/abandon step.
-// The mandatory updater must not restart while completed files are still only
+// The updater must not restart while completed files are still only
 // reachable from the export dialog's temporary job directory.
 export const hasActiveExportSession = (): boolean =>
   jobs.size > 0 || reservations.size > 0;

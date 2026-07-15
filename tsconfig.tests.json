@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "incremental": false,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "tests/**/*.mts",
+    "electron/updater-controller.ts",
+    "electron/update-export-interlock.ts",
+    "electron/update-restart-guard.ts",
+    "lib/desktop-bridge.ts",
+    "lib/desktop-release.ts",
+    "lib/desktop-update.ts",
+    "lib/export-options.ts",
+    "lib/export-session.ts"
+  ],
+  "exclude": ["node_modules", "electron/dist"]
+}

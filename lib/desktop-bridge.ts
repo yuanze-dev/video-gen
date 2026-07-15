@@ -15,6 +15,7 @@ export type DesktopUpdateState = {
     | "idle"
     | "checking"
     | "downloading"
+    | "preparing"
     | "ready"
     | "installing"
     | "not-available"
@@ -48,7 +49,11 @@ export type DesktopRenderBridge = {
   supportsExportOptions?: boolean;
   supportsEndingVideo?: boolean;
   supportsUpdateStatus?: boolean;
-  beginExportSession?: () => Promise<{ ok: true; sessionId: string }>;
+  /** Native-ready signal plus the main-process export/restart interlock. */
+  supportsSafeUpdateRestart?: boolean;
+  beginExportSession?: () => Promise<
+    { ok: true; sessionId: string } | { ok: false; error: string }
+  >;
   endExportSession?: (sessionId: string) => Promise<{ ok: true }>;
   render: (payload: {
     serveUrl: string;
@@ -71,18 +76,32 @@ export type DesktopRenderBridge = {
   onUpdateState?: (callback: (state: DesktopUpdateState) => void) => () => void;
 };
 
-export type DesktopUpdateGateMode = "hidden" | "manual" | "legacy-auto" | "observable";
+export type DesktopUpdateClientMode =
+  | "hidden"
+  | "manual"
+  | "legacy-auto"
+  | "legacy-status"
+  | "observable";
 
 type DesktopBridgeCapabilities = Pick<
   DesktopRenderBridge,
-  "isAvailable" | "supportsExportOptions" | "supportsEndingVideo" | "supportsUpdateStatus"
+  | "isAvailable"
+  | "supportsExportOptions"
+  | "supportsEndingVideo"
+  | "supportsUpdateStatus"
+  | "supportsSafeUpdateRestart"
 >;
 
-export function classifyDesktopUpdateGate(
+export function classifyDesktopUpdateClient(
   bridge?: Partial<DesktopBridgeCapabilities>,
-): DesktopUpdateGateMode {
+): DesktopUpdateClientMode {
   if (!bridge?.isAvailable) return "hidden";
-  if (bridge.supportsUpdateStatus) return "observable";
+  // v0.2.2 already exposed useful download/error events, but its macOS `ready`
+  // event arrived before Squirrel had actually staged the update and it had no
+  // export latch. Keep those events as read-only status while reserving restart
+  // actions for the new end-to-end capability.
+  if (bridge.supportsUpdateStatus && bridge.supportsSafeUpdateRestart) return "observable";
+  if (bridge.supportsUpdateStatus) return "legacy-status";
   if (bridge.supportsEndingVideo || bridge.supportsExportOptions) return "legacy-auto";
   return "manual";
 }
@@ -97,6 +116,7 @@ export function inferDesktopClientVersion(
   bridge?: Partial<DesktopBridgeCapabilities>,
 ): string | null {
   if (!bridge?.isAvailable) return null;
+  if (bridge.supportsSafeUpdateRestart) return "0.2.3";
   if (bridge.supportsUpdateStatus) return "0.2.2";
   if (bridge.supportsEndingVideo) return "0.2.1";
   if (bridge.supportsExportOptions) return "0.2.0";
@@ -150,22 +170,22 @@ export function compareDesktopVersions(left: string, right: string): -1 | 0 | 1 
   return comparePrerelease(a.prerelease, b.prerelease);
 }
 
-export function shouldBlockDesktopUpdate({
+export function isDesktopUpdateAvailable({
   mode,
-  releaseRequired,
+  releaseAvailable,
   currentVersion,
-  requiredVersion,
+  latestVersion,
 }: {
-  mode: DesktopUpdateGateMode;
-  releaseRequired: boolean;
+  mode: DesktopUpdateClientMode;
+  releaseAvailable: boolean;
   currentVersion: string | null | undefined;
-  requiredVersion: string;
+  latestVersion: string;
 }): boolean {
   return (
     mode !== "hidden" &&
-    releaseRequired &&
+    releaseAvailable &&
     typeof currentVersion === "string" &&
-    compareDesktopVersions(currentVersion, requiredVersion) === -1
+    compareDesktopVersions(currentVersion, latestVersion) === -1
   );
 }
 

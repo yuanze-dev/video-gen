@@ -6,7 +6,10 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
+
+concurrency:
+  group: release-macos
+  cancel-in-progress: false
 
 permissions:
   contents: write # create/upload the GitHub Release (auto-update feed) in this repo
@@ -16,6 +19,8 @@ jobs:
     runs-on: macos-14 # Apple Silicon (arm64)
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Fail fast with a clear message if signing/notarization secrets are absent.
       # (GitHub passes unset secrets as empty strings, which makes electron-builder
@@ -46,22 +51,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify tag matches package version
-        if: github.ref_type == 'tag'
+      - name: Verify tag source and package version
         run: |
           EXPECTED="v$(node -p "require('./package.json').version")"
           if [ "$GITHUB_REF_NAME" != "$EXPECTED" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match package version $EXPECTED"
             exit 1
           fi
+          TAGGED_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          git fetch origin main --no-tags
+          if ! git merge-base --is-ancestor "$TAGGED_COMMIT" origin/main; then
+            echo "::error::Tag $GITHUB_REF_NAME does not point to a commit merged into origin/main"
+            exit 1
+          fi
 
       - name: Ensure headless Chromium (chrome-headless-shell)
         run: node scripts/ensure-chrome.mjs
 
-      - name: Build Remotion site + Electron bundles
+      - name: Verify Web, updater and Electron bundles
         run: |
-          npm run build:remotion-site
+          npm run build
           npm run typecheck:electron
+          npm run typecheck:tests
           npm run test:update
           npm run build:electron
 
@@ -85,21 +96,51 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: npx electron-builder --mac --publish always
 
-      # Depending on the electron-builder version/provider settings, the release
-      # may already be public or may still be a draft. Publish only when needed,
-      # then drop the redundant package-name zip electron-builder may emit
-      # alongside the littlestart-*.zip referenced by latest-mac.yml.
-      - name: Finalize release (publish + tidy)
+      # electron-builder uploads into a draft. Remove its redundant zip, verify
+      # every public install/update path, and only then atomically publish.
+      - name: Finalize release (verify + tidy + publish)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           RAW="$(node -p "require('./package.json').version")"
           VERSION="v$RAW"
+          ZIP="littlestart-$RAW-arm64-mac.zip"
+          BLOCKMAP="$ZIP.blockmap"
+          DMG="littlestart-$RAW-arm64.dmg"
           IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"
-          if [ "$IS_DRAFT" = "true" ]; then
-            gh release edit "$VERSION" --draft=false
-          elif [ "$IS_DRAFT" != "false" ]; then
+          if [ "$IS_DRAFT" != "true" ] && [ "$IS_DRAFT" != "false" ]; then
             echo "::error::Unexpected isDraft value for $VERSION: $IS_DRAFT"
             exit 1
           fi
+
           gh release delete-asset "$VERSION" "video-gen-$RAW-arm64-mac.zip" --yes || true
+
+          ASSETS="$(gh release view "$VERSION" --json assets --jq '.assets[].name')"
+          for asset in latest-mac.yml "$ZIP" "$BLOCKMAP" "$DMG"; do
+            if ! grep -Fxq "$asset" <<<"$ASSETS"; then
+              echo "::error::Release $VERSION is missing required asset: $asset"
+              exit 1
+            fi
+          done
+
+          CHECK_DIR="$RUNNER_TEMP/release-$RAW"
+          rm -rf "$CHECK_DIR"
+          mkdir -p "$CHECK_DIR"
+          gh release download "$VERSION" --pattern latest-mac.yml --dir "$CHECK_DIR"
+          node - "$CHECK_DIR/latest-mac.yml" "$RAW" "$ZIP" <<'NODE'
+          const fs = require("node:fs");
+          const [manifestPath, expectedVersion, expectedZip] = process.argv.slice(2);
+          const manifest = fs.readFileSync(manifestPath, "utf8");
+          const version = manifest.match(/^version:\s*['"]?([^\s'"]+)['"]?\s*$/m)?.[1];
+          const zip = manifest.match(/^path:\s*['"]?([^\s'"]+)['"]?\s*$/m)?.[1];
+          if (version !== expectedVersion || zip !== expectedZip) {
+            console.error(`::error::Invalid latest-mac.yml: version=${version}, path=${zip}`);
+            process.exit(1);
+          }
+          NODE
+
+          if [ "$IS_DRAFT" = "true" ]; then
+            gh release edit "$VERSION" --draft=false
+          else
+            echo "$VERSION is already public; verified all required assets."
+          fi

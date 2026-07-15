@@ -37,8 +37,14 @@ const electronRender = {
   // Status snapshots + events let the remote editor show truthful download
   // progress and recovery actions instead of an unbounded generic spinner.
   supportsUpdateStatus: true as const,
+  // The main process waits for both native Squirrel readiness and the complete
+  // electron-updater download operation, then atomically blocks new exports
+  // after the user chooses restart. Old v0.2.2 shells do not expose this flag.
+  supportsSafeUpdateRestart: true as const,
 
-  beginExportSession: (): Promise<{ ok: true; sessionId: string }> =>
+  beginExportSession: (): Promise<
+    { ok: true; sessionId: string } | { ok: false; error: string }
+  > =>
     ipcRenderer.invoke("render:session-begin"),
 
   endExportSession: (sessionId: string): Promise<{ ok: true }> =>
