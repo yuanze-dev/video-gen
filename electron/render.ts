@@ -27,6 +27,7 @@ export type RenderRequest = {
   config: unknown;
   assets: IncomingAsset[];
   options?: unknown;
+  sessionId?: string;
 };
 
 export type RenderResult = {
@@ -39,25 +40,50 @@ type StoredAsset = { file: string; mime: string };
 type Job = {
   id: string;
   dir: string;
+  ownerId: number;
   assets: Record<string, StoredAsset>;
   outputPath?: string;
   coverPath?: string;
   cancel?: () => void;
-  active?: boolean; // true for the whole render (incl. browser launch), cleared in finally
+  rendering: boolean;
+  abandoned: boolean;
 };
 
 const jobs = new Map<string, Job>();
+const reservations = new Map<string, number>();
 export const getJob = (id: string): Job | undefined => jobs.get(id);
 
-// True while any job is doing work — from the moment it enters the map through
-// asset write, browser launch, encode and cover, cleared in a finally on success
-// OR failure. The auto-updater checks this so a restart-to-update never kills an
-// in-progress export. (Keyed on an explicit flag, not `cancel`, which is only set
-// during the encode phase and would otherwise miss setup and leak on errors.)
-export const isRendering = (): boolean => {
-  for (const job of jobs.values()) if (job.active) return true;
-  return false;
-};
+// A session remains active through rendering AND the user's save/abandon step.
+// The mandatory updater must not restart while completed files are still only
+// reachable from the export dialog's temporary job directory.
+export const hasActiveExportSession = (): boolean =>
+  jobs.size > 0 || reservations.size > 0;
+
+export function beginExportSession(ownerId: number): string {
+  const id = crypto.randomUUID();
+  reservations.set(id, ownerId);
+  return id;
+}
+
+export function endExportSession(sessionId: string, ownerId: number): void {
+  if (reservations.get(sessionId) === ownerId) reservations.delete(sessionId);
+}
+
+export function cleanupExportSessionsForOwner(ownerId: number): void {
+  for (const [id, owner] of reservations) {
+    if (owner === ownerId) reservations.delete(id);
+  }
+  for (const job of jobs.values()) {
+    if (job.ownerId !== ownerId) continue;
+    if (job.rendering) {
+      job.abandoned = true;
+      job.cancel?.();
+    } else {
+      jobs.delete(job.id);
+      void fs.rm(job.dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+}
 
 // ---- localhost asset server (lazy, shared across renders) -------------------
 
@@ -113,6 +139,7 @@ function ensureAssetServer(): Promise<number> {
 export async function startRender(
   req: RenderRequest,
   onProgress: (progress: number) => void,
+  ownerId: number,
 ): Promise<RenderResult> {
   const parsed = ProjectConfig.safeParse(req.config);
   if (!parsed.success) {
@@ -124,11 +151,22 @@ export async function startRender(
 
   const id = crypto.randomUUID();
   const dir = path.join(os.tmpdir(), "teleprompter-render", id);
-  await fs.mkdir(dir, { recursive: true });
-  const job: Job = { id, dir, assets: {}, active: true };
+  const job: Job = {
+    id,
+    dir,
+    ownerId,
+    assets: {},
+    rendering: true,
+    abandoned: false,
+  };
+  // Register before the first await so the updater cannot observe an idle gap
+  // while the job directory is being created.
+  if (req.sessionId) endExportSession(req.sessionId, ownerId);
   jobs.set(id, job);
 
   try {
+    await fs.mkdir(dir, { recursive: true });
+    if (job.abandoned) throw new Error("导出页面已关闭");
     // Persist incoming assets to disk so the localhost server can stream them.
     // The id arrives over IPC from the page; reject anything that could escape
     // the job dir before using it as a path segment (defense-in-depth).
@@ -139,6 +177,7 @@ export async function startRender(
       const fp = path.join(dir, a.id);
       await fs.writeFile(fp, Buffer.from(a.data));
       job.assets[a.id] = { file: fp, mime: a.mime || "application/octet-stream" };
+      if (job.abandoned) throw new Error("导出页面已关闭");
     }
 
     const port = await ensureAssetServer();
@@ -174,6 +213,7 @@ export async function startRender(
     if (binariesDirectory) common.binariesDirectory = binariesDirectory;
 
     await ensureBrowser(browserExecutable ? { browserExecutable } : undefined);
+    if (job.abandoned) throw new Error("导出页面已关闭");
 
     const composition = await selectComposition({
       serveUrl: req.serveUrl,
@@ -181,6 +221,7 @@ export async function startRender(
       inputProps,
       ...common,
     });
+    if (job.abandoned) throw new Error("导出页面已关闭");
 
     const { cancelSignal, cancel } = makeCancelSignal();
     job.cancel = cancel;
@@ -198,6 +239,7 @@ export async function startRender(
       onProgress: ({ progress }: { progress: number }) => onProgress(progress),
       ...common,
     });
+    if (job.abandoned) throw new Error("导出页面已关闭");
     job.outputPath = outputPath;
 
     // Cover = first frame (closed curtain), matches the web pipeline.
@@ -213,14 +255,18 @@ export async function startRender(
       scale,
       ...common,
     });
+    if (job.abandoned) throw new Error("导出页面已关闭");
     job.coverPath = coverPath;
     job.cancel = undefined;
+    job.rendering = false;
 
     return { jobId: id, outputPath, coverPath };
-  } finally {
-    // Mark the job idle whether it finished or threw, so a failed render never
-    // leaves the auto-updater thinking an export is still running.
-    job.active = false;
+  } catch (error) {
+    // Failed/cancelled jobs never reach the save step, so release the updater
+    // guard and remove partial artifacts before surfacing the error.
+    jobs.delete(id);
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
 }
 
@@ -231,6 +277,11 @@ export function cancelRender(jobId: string): void {
 export async function cleanupJob(jobId: string): Promise<void> {
   const job = jobs.get(jobId);
   if (!job) return;
+  if (job.rendering) {
+    job.abandoned = true;
+    job.cancel?.();
+    return;
+  }
   jobs.delete(jobId);
   await fs.rm(job.dir, { recursive: true, force: true }).catch(() => {});
 }

@@ -9,7 +9,7 @@
 // As a safety net, a downloaded update also installs on the next normal quit.
 import { app, dialog, type BrowserWindow } from "electron";
 import { autoUpdater } from "electron-updater";
-import { isRendering } from "./render";
+import { hasActiveExportSession } from "./render";
 
 const SIX_HOURS = 6 * 60 * 60 * 1000;
 const IDLE_RETRY_MS = 5_000;
@@ -25,7 +25,9 @@ export function initAutoUpdate(getWindow: () => BrowserWindow | null): void {
   let dialogOpen = false; // guard against overlapping prompts
 
   const maybeInstall = async (): Promise<void> => {
-    if (!pending || dialogOpen || isRendering()) return; // wait for an idle moment
+    // Wait through render, save dialog, and the user's explicit save/abandon
+    // decision. Completed-but-unsaved files still live only in the temp job.
+    if (!pending || dialogOpen || hasActiveExportSession()) return;
     dialogOpen = true;
     try {
       const win = getWindow();

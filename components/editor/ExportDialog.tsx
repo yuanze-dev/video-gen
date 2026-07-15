@@ -8,6 +8,7 @@ import { Progress } from "@/components/ui/progress";
 import { useEditor } from "@/lib/store";
 import type { ProjectConfig } from "@/lib/config-schema";
 import { DEFAULT_EXPORT_OPTIONS, type ExportOptions } from "@/lib/export-options";
+import { setExportSessionActive } from "@/lib/export-session";
 import { ExportOptionsForm } from "./ExportOptions";
 
 type Phase = "idle" | "working" | "done" | "error" | "unsupported" | "outdated";
@@ -18,11 +19,14 @@ type ElectronRender = {
   isAvailable: boolean;
   supportsExportOptions?: boolean; // absent on shells older than the export-options release
   supportsEndingVideo?: boolean; // absent on shells older than the ending-video release
+  beginExportSession?: () => Promise<{ ok: true; sessionId: string }>;
+  endExportSession?: (sessionId: string) => Promise<{ ok: true }>;
   render: (p: {
     serveUrl: string;
     config: unknown;
     assets: RenderAsset[];
     options: ExportOptions;
+    sessionId?: string;
   }) => Promise<{ ok: true; jobId: string } | { ok: false; error: string }>;
   onProgress: (cb: (progress: number) => void) => () => void;
   save: (
@@ -85,8 +89,10 @@ export function ExportDialog() {
   const [stat, setStat] = useState("准备渲染任务…");
   const [jobId, setJobId] = useState<string | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [videoSaved, setVideoSaved] = useState(false);
   const unsubRef = useRef<(() => void) | null>(null);
   const jobRef = useRef<string | null>(null);
+  const sessionRef = useRef<string | null>(null);
 
   const cleanup = () => {
     unsubRef.current?.();
@@ -94,12 +100,36 @@ export function ExportDialog() {
   };
   // Tell the desktop app to delete the finished job's temp dir (uploaded
   // assets + rendered files) so nothing lingers on disk between exports.
-  const discardJob = () => {
+  const discardJob = async () => {
     const id = jobRef.current;
+    const sessionId = sessionRef.current;
     jobRef.current = null;
-    if (id) void window.electronRender?.cleanup(id);
+    sessionRef.current = null;
+    try {
+      if (sessionId) await window.electronRender?.endExportSession?.(sessionId);
+      if (id) await window.electronRender?.cleanup(id);
+    } finally {
+      setExportSessionActive(false);
+    }
   };
-  useEffect(() => () => cleanup(), []);
+  useEffect(
+    () => () => {
+      cleanup();
+      const id = jobRef.current;
+      const sessionId = sessionRef.current;
+      jobRef.current = null;
+      sessionRef.current = null;
+      void (async () => {
+        try {
+          if (sessionId) await window.electronRender?.endExportSession?.(sessionId);
+          if (id) await window.electronRender?.cleanup(id);
+        } finally {
+          setExportSessionActive(false);
+        }
+      })();
+    },
+    [],
+  );
 
   const start = async (opts: ExportOptions) => {
     const bridge = window.electronRender;
@@ -115,14 +145,20 @@ export function ExportDialog() {
     }
 
     cleanup();
-    discardJob();
+    await discardJob();
+    setExportSessionActive(true);
     setPhase("working");
     setProgress(0);
     setSavedPath(null);
+    setVideoSaved(false);
     setJobId(null);
     setStat("打包素材，提交本机渲染…");
 
     try {
+      if (bridge.beginExportSession) {
+        const reservation = await bridge.beginExportSession();
+        sessionRef.current = reservation.sessionId;
+      }
       const { config, assetUrls, fileNames } = editor;
       const assets = await collectAssets(config, assetUrls, fileNames);
       const serveUrl = `${window.location.origin}/remotion-site/`;
@@ -132,13 +168,24 @@ export function ExportDialog() {
         setStat("本机合成图层 · 编码 H.264…");
       });
 
-      const res = await bridge.render({ serveUrl, config, assets, options: opts });
+      const res = await bridge.render({
+        serveUrl,
+        config,
+        assets,
+        options: opts,
+        sessionId: sessionRef.current ?? undefined,
+      });
       cleanup();
       if (!res.ok) {
+        const sessionId = sessionRef.current;
+        sessionRef.current = null;
+        if (sessionId) await bridge.endExportSession?.(sessionId);
+        setExportSessionActive(false);
         setStat(res.error || "渲染失败");
         setPhase("error");
         return;
       }
+      sessionRef.current = null;
       jobRef.current = res.jobId;
       setJobId(res.jobId);
       setProgress(100);
@@ -146,6 +193,10 @@ export function ExportDialog() {
       setPhase("done");
     } catch (e) {
       cleanup();
+      const sessionId = sessionRef.current;
+      sessionRef.current = null;
+      if (sessionId) await bridge.endExportSession?.(sessionId).catch(() => {});
+      setExportSessionActive(false);
       setStat(e instanceof Error ? e.message : "渲染失败");
       setPhase("error");
     }
@@ -155,7 +206,10 @@ export function ExportDialog() {
     const bridge = window.electronRender;
     if (!bridge || !jobId) return;
     const res = await bridge.save(jobId, kind);
-    if (res.ok) setSavedPath(res.path);
+    if (res.ok) {
+      setSavedPath(res.path);
+      if (kind === "video") setVideoSaved(true);
+    }
   };
 
   return (
@@ -183,11 +237,22 @@ export function ExportDialog() {
       <Dialog
         open={open}
         onOpenChange={(o) => {
+          if (!o && phase === "working") return;
+          if (
+            !o &&
+            phase === "done" &&
+            jobId &&
+            !videoSaved &&
+            !window.confirm("导出视频尚未保存，确定放弃这次导出吗？")
+          ) {
+            return;
+          }
           setOpen(o);
           if (!o) {
             cleanup();
-            discardJob();
+            void discardJob();
             setPhase("idle");
+            setJobId(null);
           }
         }}
       >

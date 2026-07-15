@@ -16,6 +16,7 @@ export type RenderPayload = {
   config: unknown;
   assets: BridgeAsset[];
   options?: ExportOptions;
+  sessionId?: string;
 };
 
 const electronRender = {
@@ -28,6 +29,12 @@ const electronRender = {
   // A remote editor can use this to avoid silently dropping a custom ending
   // when paired with an older installed shell whose resolver predates it.
   supportsEndingVideo: true as const,
+
+  beginExportSession: (): Promise<{ ok: true; sessionId: string }> =>
+    ipcRenderer.invoke("render:session-begin"),
+
+  endExportSession: (sessionId: string): Promise<{ ok: true }> =>
+    ipcRenderer.invoke("render:session-end", sessionId),
 
   render: (payload: RenderPayload): Promise<{ ok: true; jobId: string } | { ok: false; error: string }> =>
     ipcRenderer.invoke("render:start", payload),
