@@ -84,7 +84,11 @@ jobs:
         run: |
           RAW="$(node -p "require('./package.json').version")"
           VERSION="v$RAW"
-          if [ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" = "true" ]; then
+          IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"
+          if [ "$IS_DRAFT" = "true" ]; then
             gh release edit "$VERSION" --draft=false
+          elif [ "$IS_DRAFT" != "false" ]; then
+            echo "::error::Unexpected isDraft value for $VERSION: $IS_DRAFT"
+            exit 1
           fi
           gh release delete-asset "$VERSION" "video-gen-$RAW-arm64-mac.zip" --yes || true
