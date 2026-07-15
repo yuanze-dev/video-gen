@@ -19,6 +19,8 @@ type DesktopReleaseInfo = {
 async function inspectRelease(tag: string): Promise<DesktopReleaseInfo> {
   const version = tag.replace(/^v/, "");
   const manifestUrl = `${RELEASE_BASE}/download/${tag}/latest-mac.yml`;
+  const updaterPath = `littlestart-${version}-arm64-mac.zip`;
+  const updaterUrl = `${RELEASE_BASE}/download/${tag}/${updaterPath}`;
   const downloadUrl = `${RELEASE_BASE}/download/${tag}/littlestart-${version}-arm64.dmg`;
   const releasePageUrl = `${RELEASE_BASE}/tag/${tag}`;
 
@@ -26,8 +28,14 @@ async function inspectRelease(tag: string): Promise<DesktopReleaseInfo> {
     // Never advertise a release until both the updater manifest and the manual
     // fallback are public. Reading the manifest body also protects against
     // a mistagged release whose embedded version doesn't match the forced tag.
-    const [manifestResponse, installerResponse] = await Promise.all([
+    const [manifestResponse, updaterResponse, installerResponse] = await Promise.all([
       fetch(manifestUrl, {
+        redirect: "follow",
+        next: { revalidate: 15 },
+        signal: AbortSignal.timeout(8_000),
+      }),
+      fetch(updaterUrl, {
+        method: "HEAD",
         redirect: "follow",
         next: { revalidate: 15 },
         signal: AbortSignal.timeout(8_000),
@@ -43,8 +51,10 @@ async function inspectRelease(tag: string): Promise<DesktopReleaseInfo> {
     const available = isDesktopReleaseReady({
       manifestOk: manifestResponse.ok,
       installerOk: installerResponse.ok,
+      updaterOk: updaterResponse.ok,
       manifest,
       requiredVersion: tag,
+      expectedUpdaterPath: updaterPath,
     });
     const sizeHeader = installerResponse.headers.get("content-length");
     const downloadSizeBytes = sizeHeader ? Number(sizeHeader) : undefined;

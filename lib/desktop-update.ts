@@ -121,8 +121,9 @@ export function deriveDesktopUpdatePresentation({
   if (mode === "hidden") return HIDDEN_PRESENTATION;
 
   const releaseAvailable = desktopReleaseIsAvailable(release);
+  const observesUpdateState = mode === "observable" || mode === "legacy-status";
   const currentVersion =
-    mode === "observable" ? (updateState?.currentVersion ?? inferredVersion) : inferredVersion;
+    observesUpdateState ? (updateState?.currentVersion ?? inferredVersion) : inferredVersion;
   const outdated =
     !!release &&
     isDesktopUpdateAvailable({
@@ -146,18 +147,20 @@ export function deriveDesktopUpdatePresentation({
 
   if (mode === "legacy-auto") {
     if (!outdated || !release) return HIDDEN_PRESENTATION;
-    const hasStatusButUnsafeRestart =
-      !!inferredVersion && compareDesktopVersions(inferredVersion, "0.2.2") !== -1;
+    const forcesOneTimeRestart =
+      !!inferredVersion && compareDesktopVersions(inferredVersion, "0.2.1") === 0;
     return {
       kind: "legacy",
-      title: `正在后台准备 ${displayVersion(release.version)}`,
-      detail: hasStatusButUnsafeRestart
-        ? "你可以继续编辑和导出；稍后正常退出应用时会自动安装。"
-        : "旧版无法显示实时进度；你可以继续使用，稍后正常退出应用即可安装。",
+      title: forcesOneTimeRestart
+        ? `旧版正在准备一次迁移更新`
+        : `正在后台准备 ${displayVersion(release.version)}`,
+      detail: forcesOneTimeRestart
+        ? "此旧版下载完成后会显示必须重启提示；请先保存工作。升级后即可自主选择重启。"
+        : "旧版无法显示实时进度；下载完成后可以选择稍后，或在正常退出时安装。",
       targetVersion: release.version,
       indeterminate: true,
       primaryAction: "manual",
-      primaryLabel: "手动下载",
+      primaryLabel: forcesOneTimeRestart ? "现在手动更新" : "手动下载",
     };
   }
 
@@ -183,6 +186,98 @@ export function deriveDesktopUpdatePresentation({
   const installFailed = status === "error" && updateState?.errorPhase === "install";
   const targetIsNewer =
     !!currentVersion && !!targetVersion && compareDesktopVersions(currentVersion, targetVersion) === -1;
+
+  if (mode === "legacy-status") {
+    if (!outdated && !activeUpdate && status !== "error" && !targetIsNewer) {
+      return HIDDEN_PRESENTATION;
+    }
+
+    if (status === "downloading") {
+      const percent = sanitizePercent(updateState?.percent);
+      if (downloadStalled) {
+        return {
+          kind: "stalled",
+          title: "下载暂时没有进展",
+          detail: "不影响当前使用；可以继续等待，或改用安装包。",
+          targetVersion,
+          percent,
+          primaryAction: releaseMatchesTarget ? "manual" : undefined,
+          primaryLabel: "手动下载",
+        };
+      }
+      return {
+        kind: "downloading",
+        title: `正在后台下载 ${displayVersion(targetVersion)}`,
+        detail: "这是旧版可确认的下载进度；完成工作后正常退出即可尝试安装。",
+        targetVersion,
+        percent,
+      };
+    }
+
+    if (status === "preparing" || status === "ready") {
+      return {
+        kind: "legacy",
+        title: `${displayVersion(targetVersion)} 文件已下载`,
+        detail:
+          "此旧版无法安全确认 macOS 已准备好立即重启；请完成工作后正常退出，未更新时可手动安装。",
+        targetVersion,
+        indeterminate: status === "preparing",
+        primaryAction: releaseMatchesTarget ? "manual" : undefined,
+        primaryLabel: "手动安装",
+      };
+    }
+
+    if (status === "installing") {
+      return {
+        kind: "installing",
+        title: "正在重启并完成更新",
+        detail: "应用即将关闭；重新打开后请确认版本是否已经更新。",
+        targetVersion,
+        indeterminate: true,
+      };
+    }
+
+    if (status === "error") {
+      const canRetry = updateState?.errorPhase !== "install";
+      return {
+        kind: "error",
+        title: "旧版后台更新未完成",
+        detail: updateState?.message
+          ? `${updateState.message}；不影响当前使用。`
+          : "不影响当前使用，可以稍后重试或手动安装。",
+        targetVersion,
+        primaryAction: canRetry
+          ? "retry"
+          : releaseMatchesTarget
+            ? "manual"
+            : undefined,
+        primaryLabel: canRetry ? "重新尝试" : "手动安装",
+        showManualAction: canRetry && releaseMatchesTarget,
+      };
+    }
+
+    if (status === "unsupported") {
+      return {
+        kind: "manual",
+        title: `${displayVersion(targetVersion ?? release?.version)} 可用`,
+        detail: "当前环境无法自动更新；可以继续使用，准备好后手动安装。",
+        targetVersion,
+        primaryAction: releaseMatchesTarget ? "manual" : undefined,
+        primaryLabel: "下载安装包",
+      };
+    }
+
+    return {
+      kind: "checking",
+      title: status === "not-available" ? "新版暂未开始下载" : "正在检查后台更新",
+      detail: "你可以继续编辑和导出，不会中断当前操作。",
+      targetVersion,
+      indeterminate: true,
+      primaryAction: status === "not-available" ? "retry" : undefined,
+      primaryLabel: "重新尝试",
+      showManualAction: status === "not-available" && releaseMatchesTarget,
+    };
+  }
 
   if (!outdated && !activeUpdate && !installFailed && !targetIsNewer) {
     return HIDDEN_PRESENTATION;
@@ -261,11 +356,14 @@ export function deriveDesktopUpdatePresentation({
     return {
       kind: "error",
       title: "没有成功重启，新版仍已准备好",
-      detail: updateState?.message ?? "可以在方便时再次尝试重启。",
+      detail: exportActive
+        ? "当前导出完成并关闭后可以再次重启。"
+        : (updateState?.message ?? "可以在方便时再次尝试重启。"),
       targetVersion,
       primaryAction: "restart",
-      primaryLabel: "再次重启更新",
+      primaryLabel: exportActive ? "导出后可重启" : "再次重启更新",
       showManualAction: releaseMatchesTarget,
+      restartDisabled: exportActive,
       alert: true,
     };
   }

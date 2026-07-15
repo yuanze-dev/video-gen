@@ -11,7 +11,8 @@ publish:
   - provider: github
     owner: yuanze-dev
     repo: video-gen
-    releaseType: release # publish immediately (not draft) so clients see updates
+    # Keep the feed invisible until the workflow verifies every required asset.
+    releaseType: draft
 
 directories:
   output: release

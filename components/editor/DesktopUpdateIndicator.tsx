@@ -69,8 +69,19 @@ const toneClass: Record<Exclude<DesktopUpdatePresentationKind, "hidden">, string
   error: "border-amber-300/15 bg-amber-300/[0.045]",
 };
 
-function StatusIcon({ kind, pending }: { kind: DesktopUpdatePresentationKind; pending: boolean }) {
+function StatusIcon({
+  kind,
+  pending,
+  indeterminate,
+}: {
+  kind: DesktopUpdatePresentationKind;
+  pending: boolean;
+  indeterminate: boolean;
+}) {
   if (kind === "ready") return <CheckCircle2 className="size-4 text-emerald-400" />;
+  if (kind === "legacy" && !indeterminate) {
+    return <CheckCircle2 className="size-4 text-emerald-400" />;
+  }
   if (kind === "manual" || kind === "downloading") {
     return <Download className="size-4 text-[#ff72aa]" />;
   }
@@ -94,6 +105,7 @@ function StatusIcon({ kind, pending }: { kind: DesktopUpdatePresentationKind; pe
 
 export function DesktopUpdateIndicator() {
   const { mode, inferredVersion } = useDesktopUpdateClient();
+  const observesUpdateState = mode === "observable" || mode === "legacy-status";
   const exportActive = useExportSessionActive();
   const localAssetCount = useEditor((state) => Object.keys(state.assetUrls).length);
   const [release, setRelease] = useState<DesktopReleaseInfo | null>(null);
@@ -142,7 +154,7 @@ export function DesktopUpdateIndicator() {
 
   useEffect(() => {
     latestRevisionRef.current = -1;
-    if (mode !== "observable") return;
+    if (!observesUpdateState) return;
 
     const bridge = window.electronRender;
     let disposed = false;
@@ -193,7 +205,7 @@ export function DesktopUpdateIndicator() {
       disposed = true;
       unsubscribe();
     };
-  }, [inferredVersion, mode]);
+  }, [inferredVersion, observesUpdateState]);
 
   const currentVersion = updateState?.currentVersion ?? inferredVersion;
   const releaseOutdated =
@@ -207,7 +219,7 @@ export function DesktopUpdateIndicator() {
 
   useEffect(() => {
     if (
-      mode !== "observable" ||
+      !observesUpdateState ||
       !releaseOutdated ||
       !canAutoCheckDesktopUpdate(updateState) ||
       !release ||
@@ -217,7 +229,7 @@ export function DesktopUpdateIndicator() {
     }
     requestedVersionRef.current = release.version;
     void window.electronRender?.retryUpdate?.().catch(() => {});
-  }, [mode, release, releaseOutdated, updateState]);
+  }, [observesUpdateState, release, releaseOutdated, updateState]);
 
   useEffect(() => {
     if (updateState?.status !== "downloading" && updateState?.status !== "preparing") return;
@@ -241,7 +253,7 @@ export function DesktopUpdateIndicator() {
     inferredVersion,
     release,
     updateState,
-    updateStateReady: mode !== "observable" || updateStateReady,
+    updateStateReady: !observesUpdateState || updateStateReady,
     exportActive,
     downloadStalled:
       (updateState?.status === "downloading" || updateState?.status === "preparing") &&
@@ -337,7 +349,11 @@ export function DesktopUpdateIndicator() {
           title={`${presentation.title}。${detail}`}
         >
           <span className="grid size-6 shrink-0 place-items-center rounded-lg bg-black/15">
-            <StatusIcon kind={presentation.kind} pending={actionPending} />
+            <StatusIcon
+              kind={presentation.kind}
+              pending={actionPending}
+              indeterminate={presentation.indeterminate === true}
+            />
           </span>
 
           <div className="min-w-0 flex-1">

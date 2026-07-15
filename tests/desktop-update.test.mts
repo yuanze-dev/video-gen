@@ -17,6 +17,7 @@ import {
 } from "../lib/desktop-update.ts";
 import {
   isDesktopReleaseReady,
+  readDesktopManifestPath,
   readDesktopManifestVersion,
   selectDesktopRelease,
 } from "../lib/desktop-release.ts";
@@ -52,7 +53,7 @@ test("maps every shipped desktop generation without treating a feature flag as a
         supportsEndingVideo: true,
         supportsUpdateStatus: true,
       },
-      "legacy-auto",
+      "legacy-status",
       "0.2.2",
     ],
     [
@@ -113,20 +114,37 @@ test("advertises a verified update only to an older desktop without implying a b
 });
 
 test("reads and verifies release assets before advertising availability", () => {
-  assert.equal(readDesktopManifestVersion("version: 0.2.2\nfiles: []\n"), "0.2.2");
+  const manifest = [
+    "version: 0.2.2",
+    "files:",
+    "  - url: littlestart-0.2.2-arm64-mac.zip",
+    "path: littlestart-0.2.2-arm64-mac.zip",
+    "",
+  ].join("\n");
+  assert.equal(readDesktopManifestVersion(manifest), "0.2.2");
   assert.equal(readDesktopManifestVersion("version: '0.2.2'\n"), "0.2.2");
   assert.equal(readDesktopManifestVersion("files: []\n"), null);
+  assert.equal(readDesktopManifestPath(manifest), "littlestart-0.2.2-arm64-mac.zip");
+  assert.equal(readDesktopManifestPath("path: 'update.zip'\n"), "update.zip");
+  assert.equal(readDesktopManifestPath("files: []\n"), null);
 
   const ready = {
     manifestOk: true,
     installerOk: true,
-    manifest: "version: 0.2.2\nfiles: []\n",
+    updaterOk: true,
+    manifest,
     requiredVersion: "v0.2.2",
+    expectedUpdaterPath: "littlestart-0.2.2-arm64-mac.zip",
   };
   assert.equal(isDesktopReleaseReady(ready), true);
   assert.equal(isDesktopReleaseReady({ ...ready, installerOk: false }), false);
+  assert.equal(isDesktopReleaseReady({ ...ready, updaterOk: false }), false);
   assert.equal(isDesktopReleaseReady({ ...ready, manifestOk: false }), false);
   assert.equal(isDesktopReleaseReady({ ...ready, manifest: "version: 0.2.1\n" }), false);
+  assert.equal(
+    isDesktopReleaseReady({ ...ready, expectedUpdaterPath: "different.zip" }),
+    false,
+  );
 });
 
 test("keeps the verified fallback discoverable until every target asset is ready", () => {
@@ -151,6 +169,8 @@ test("release metadata and the release API target stay synchronized", () => {
     readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"),
   ) as { packages: Record<string, { version?: string }> };
   const route = readFileSync(new URL("../app/api/desktop-release/route.ts", import.meta.url), "utf8");
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const builder = readFileSync(new URL("../electron-builder.yml", import.meta.url), "utf8");
   const target = /TARGET_RELEASE_TAG = "([^"]+)"/.exec(route)?.[1];
   const fallback = /FALLBACK_RELEASE_TAG = "([^"]+)"/.exec(route)?.[1];
 
@@ -160,6 +180,13 @@ test("release metadata and the release API target stay synchronized", () => {
   assert.equal(compareDesktopVersions(fallback!, target!), -1);
   assert.doesNotMatch(route, /required:\s*true/);
   assert.equal(route.match(/required:\s*false/g)?.length, 2);
+  assert.match(route, /updaterPath = `littlestart-\$\{version\}-arm64-mac\.zip`/);
+  assert.match(route, /updaterOk: updaterResponse\.ok/);
+  assert.doesNotMatch(workflow, /workflow_dispatch/);
+  assert.match(workflow, /git merge-base --is-ancestor/);
+  assert.match(workflow, /for asset in latest-mac\.yml "\$ZIP" "\$BLOCKMAP" "\$DMG"/);
+  assert.match(workflow, /gh release edit "\$VERSION" --draft=false/);
+  assert.match(builder, /releaseType:\s*draft/);
 });
 
 const VERIFIED_RELEASE: DesktopReleaseInfo = {
@@ -172,6 +199,7 @@ const VERIFIED_RELEASE: DesktopReleaseInfo = {
 
 function updatePresentation({
   mode = "observable",
+  inferredVersion = mode === "manual" ? "0.1.0" : CURRENT_VERSION,
   release = VERIFIED_RELEASE,
   updateState = null,
   updateStateReady = true,
@@ -180,7 +208,7 @@ function updatePresentation({
 }: Partial<Parameters<typeof deriveDesktopUpdatePresentation>[0]> = {}) {
   return deriveDesktopUpdatePresentation({
     mode,
-    inferredVersion: mode === "manual" ? "0.1.0" : CURRENT_VERSION,
+    inferredVersion,
     release,
     updateState,
     updateStateReady,
@@ -189,14 +217,14 @@ function updatePresentation({
   });
 }
 
-test("a remotely updated Web UI never exposes restart to the unsafe v0.2.2 protocol", () => {
+test("a remotely updated Web UI reads v0.2.2 status without exposing unsafe restart", () => {
   const mode = classifyDesktopUpdateClient({
     isAvailable: true,
     supportsExportOptions: true,
     supportsEndingVideo: true,
     supportsUpdateStatus: true,
   });
-  assert.equal(mode, "legacy-auto");
+  assert.equal(mode, "legacy-status");
 
   const presentation = updatePresentation({
     mode,
@@ -210,6 +238,7 @@ test("a remotely updated Web UI never exposes restart to the unsafe v0.2.2 proto
   assert.equal(presentation.kind, "legacy");
   assert.equal(presentation.primaryAction, "manual");
   assert.notEqual(presentation.primaryAction, "restart");
+  assert.match(presentation.detail, /无法安全确认/);
 });
 
 test("supports the old release response while separating availability from blocking", () => {
@@ -289,18 +318,72 @@ test("a newly published release wakes a long-running observable client once it c
   );
 });
 
-test("presents manual and legacy clients as non-blocking truthful fallbacks", () => {
+test("presents manual and pre-status clients with truthful migration limits", () => {
   const manual = updatePresentation({ mode: "manual" });
   assert.equal(manual.kind, "manual");
   assert.equal(manual.primaryAction, "manual");
   assert.match(manual.detail, /继续编辑/);
 
-  const legacy = updatePresentation({ mode: "legacy-auto" });
-  assert.equal(legacy.kind, "legacy");
-  assert.equal(legacy.indeterminate, true);
-  assert.equal(legacy.percent, undefined);
-  assert.match(legacy.detail, /继续编辑和导出/);
-  assert.match(legacy.detail, /正常退出应用时会自动安装/);
+  const forcedLegacy = updatePresentation({
+    mode: "legacy-auto",
+    inferredVersion: "0.2.1",
+  });
+  assert.equal(forcedLegacy.kind, "legacy");
+  assert.equal(forcedLegacy.indeterminate, true);
+  assert.equal(forcedLegacy.percent, undefined);
+  assert.match(forcedLegacy.detail, /必须重启提示/);
+  assert.match(forcedLegacy.detail, /升级后即可自主选择重启/);
+
+  const deferrableLegacy = updatePresentation({
+    mode: "legacy-auto",
+    inferredVersion: "0.2.0",
+  });
+  assert.equal(deferrableLegacy.kind, "legacy");
+  assert.match(deferrableLegacy.detail, /选择稍后/);
+});
+
+test("v0.2.2 exposes read-only progress and errors but never a restart command", () => {
+  const downloading = updatePresentation({
+    mode: "legacy-status",
+    updateState: {
+      revision: 1,
+      status: "downloading",
+      currentVersion: CURRENT_VERSION,
+      targetVersion: NEXT_VERSION,
+      percent: 37,
+    },
+  });
+  assert.equal(downloading.kind, "downloading");
+  assert.equal(downloading.percent, 37);
+  assert.equal(downloading.primaryAction, undefined);
+
+  const failed = updatePresentation({
+    mode: "legacy-status",
+    updateState: {
+      revision: 2,
+      status: "error",
+      currentVersion: CURRENT_VERSION,
+      targetVersion: NEXT_VERSION,
+      errorPhase: "download",
+      message: "自动下载没有完成",
+    },
+  });
+  assert.equal(failed.kind, "error");
+  assert.equal(failed.primaryAction, "retry");
+  assert.notEqual(failed.primaryAction, "restart");
+
+  const ready = updatePresentation({
+    mode: "legacy-status",
+    updateState: {
+      revision: 3,
+      status: "ready",
+      currentVersion: CURRENT_VERSION,
+      targetVersion: NEXT_VERSION,
+    },
+  });
+  assert.equal(ready.kind, "legacy");
+  assert.equal(ready.primaryAction, "manual");
+  assert.notEqual(ready.primaryAction, "restart");
 });
 
 test("maps observable download and ready states to background progress then explicit restart", () => {
@@ -354,6 +437,26 @@ test("maps observable download and ready states to background progress then expl
   assert.equal(exporting.kind, "ready");
   assert.equal(exporting.restartDisabled, true);
   assert.match(exporting.detail, /导出完成/);
+});
+
+test("disables an install retry while an export is active", () => {
+  const presentation = updatePresentation({
+    updateState: {
+      revision: 5,
+      status: "error",
+      currentVersion: CURRENT_VERSION,
+      targetVersion: NEXT_VERSION,
+      errorPhase: "install",
+      message: "应用未能自动重启，请再次尝试",
+    },
+    exportActive: true,
+  });
+
+  assert.equal(presentation.kind, "error");
+  assert.equal(presentation.primaryAction, "restart");
+  assert.equal(presentation.restartDisabled, true);
+  assert.equal(presentation.primaryLabel, "导出后可重启");
+  assert.match(presentation.detail, /导出完成/);
 });
 
 test("keeps authoritative updater state visible through API failure and release mismatch", () => {
@@ -459,6 +562,7 @@ test("update UI stays non-modal and only hands off focus after a user retry", ()
   assert.doesNotMatch(indicator, /<dialog|aria-modal|showModal\(|autoFocus/);
   assert.match(indicator, /requestAnimationFrame\(\(\) => indicatorRef\.current\?\.focus/);
   assert.match(indicator, /latestRevisionRef\.current >= 0/);
+  assert.match(indicator, /kind === "legacy" && !indeterminate/);
   assert.doesNotMatch(editor, /RequiredUpdateGate/);
   assert.match(topBar, /DesktopUpdateIndicator/);
   assert.match(indicator, /data-update-indicator/);

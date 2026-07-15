@@ -76,7 +76,12 @@ export type DesktopRenderBridge = {
   onUpdateState?: (callback: (state: DesktopUpdateState) => void) => () => void;
 };
 
-export type DesktopUpdateClientMode = "hidden" | "manual" | "legacy-auto" | "observable";
+export type DesktopUpdateClientMode =
+  | "hidden"
+  | "manual"
+  | "legacy-auto"
+  | "legacy-status"
+  | "observable";
 
 type DesktopBridgeCapabilities = Pick<
   DesktopRenderBridge,
@@ -91,11 +96,12 @@ export function classifyDesktopUpdateClient(
   bridge?: Partial<DesktopBridgeCapabilities>,
 ): DesktopUpdateClientMode {
   if (!bridge?.isAvailable) return "hidden";
-  // v0.2.2 already exposed status events, but its macOS `ready` event arrived
-  // before Squirrel had actually staged the update and it had no export latch.
-  // A remotely deployed Web UI must never expose a restart button to that
-  // older shell, so observable actions require the new end-to-end capability.
+  // v0.2.2 already exposed useful download/error events, but its macOS `ready`
+  // event arrived before Squirrel had actually staged the update and it had no
+  // export latch. Keep those events as read-only status while reserving restart
+  // actions for the new end-to-end capability.
   if (bridge.supportsUpdateStatus && bridge.supportsSafeUpdateRestart) return "observable";
+  if (bridge.supportsUpdateStatus) return "legacy-status";
   if (bridge.supportsEndingVideo || bridge.supportsExportOptions) return "legacy-auto";
   return "manual";
 }
