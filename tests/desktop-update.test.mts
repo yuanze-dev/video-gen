@@ -184,8 +184,17 @@ test("release metadata and the release API target stay synchronized", () => {
   assert.match(route, /updaterOk: updaterResponse\.ok/);
   assert.doesNotMatch(workflow, /workflow_dispatch/);
   assert.match(workflow, /git merge-base --is-ancestor/);
+  assert.match(workflow, /Prepare a single draft release/);
+  assert.match(workflow, /gh release create "\$VERSION" --draft --verify-tag/);
+  assert.match(workflow, /Found \$COUNT releases for \$VERSION/);
+  assert.match(workflow, /gh api --paginate --slurp/);
+  assert.match(workflow, /jq --arg version "\$VERSION"/);
+  assert.doesNotMatch(workflow, /--slurp[^\n]*--jq/);
   assert.match(workflow, /for asset in latest-mac\.yml "\$ZIP" "\$BLOCKMAP" "\$DMG"/);
-  assert.match(workflow, /gh release edit "\$VERSION" --draft=false/);
+  assert.match(workflow, /MANIFEST_ASSET_ID=/);
+  assert.match(workflow, /Accept: application\/octet-stream/);
+  assert.doesNotMatch(workflow, /gh release download/);
+  assert.match(workflow, /releases\/\$RELEASE_ID" -F draft=false/);
   assert.match(builder, /releaseType:\s*draft/);
 });
 
