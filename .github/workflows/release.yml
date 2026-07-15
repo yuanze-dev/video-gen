@@ -74,16 +74,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: npx electron-builder --mac --publish always
 
-      # electron-builder creates the GitHub release as a DRAFT (drafts aren't
-      # publicly readable, so auto-update clients can't see it). Publish it, and
-      # drop the redundant package-name zip electron-builder emits alongside the
-      # littlestart-*.zip that latest-mac.yml actually references (|| true so a
-      # naming change never fails the release).
+      # Depending on the electron-builder version/provider settings, the release
+      # may already be public or may still be a draft. Publish only when needed,
+      # then drop the redundant package-name zip electron-builder may emit
+      # alongside the littlestart-*.zip referenced by latest-mac.yml.
       - name: Finalize release (publish + tidy)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           RAW="$(node -p "require('./package.json').version")"
           VERSION="v$RAW"
-          gh release edit "$VERSION" --draft=false
+          IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"
+          if [ "$IS_DRAFT" = "true" ]; then
+            gh release edit "$VERSION" --draft=false
+          elif [ "$IS_DRAFT" != "false" ]; then
+            echo "::error::Unexpected isDraft value for $VERSION: $IS_DRAFT"
+            exit 1
+          fi
           gh release delete-asset "$VERSION" "video-gen-$RAW-arm64-mac.zip" --yes || true
