@@ -138,4 +138,29 @@
   .no-drag-region {
     -webkit-app-region: no-drag;
   }
+
+}
+
+.editor-scrollbar {
+  scrollbar-color: color-mix(in oklch, var(--foreground) 14%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.editor-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.editor-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.editor-scrollbar::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 16%, transparent);
+  background-clip: padding-box;
+}
+
+html.dark {
+  color-scheme: dark;
 }

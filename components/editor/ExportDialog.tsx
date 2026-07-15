@@ -10,13 +10,14 @@ import type { ProjectConfig } from "@/lib/config-schema";
 import { DEFAULT_EXPORT_OPTIONS, type ExportOptions } from "@/lib/export-options";
 import { ExportOptionsForm } from "./ExportOptions";
 
-type Phase = "idle" | "working" | "done" | "error" | "unsupported";
+type Phase = "idle" | "working" | "done" | "error" | "unsupported" | "outdated";
 
 // The render bridge injected by the Electron preload (absent in a plain browser).
 type RenderAsset = { id: string; name: string; mime: string; data: ArrayBuffer };
 type ElectronRender = {
   isAvailable: boolean;
   supportsExportOptions?: boolean; // absent on shells older than the export-options release
+  supportsEndingVideo?: boolean; // absent on shells older than the ending-video release
   render: (p: {
     serveUrl: string;
     config: unknown;
@@ -49,6 +50,7 @@ function referencedUploadIds(cfg: ProjectConfig): string[] {
   push(cfg.content.teleprompter.video?.asset);
   push(cfg.content.bgm?.asset);
   push(cfg.opening.curtain.sfx);
+  push(cfg.ending.video.asset);
   return ids;
 }
 
@@ -106,6 +108,12 @@ export function ExportDialog() {
       return;
     }
 
+    const editor = useEditor.getState();
+    if (!bridge.supportsEndingVideo && editor.config.ending.video.asset.kind === "upload") {
+      setPhase("outdated");
+      return;
+    }
+
     cleanup();
     discardJob();
     setPhase("working");
@@ -115,7 +123,7 @@ export function ExportDialog() {
     setStat("打包素材，提交本机渲染…");
 
     try {
-      const { config, assetUrls, fileNames } = useEditor.getState();
+      const { config, assetUrls, fileNames } = editor;
       const assets = await collectAssets(config, assetUrls, fileNames);
       const serveUrl = `${window.location.origin}/remotion-site/`;
 
@@ -156,7 +164,15 @@ export function ExportDialog() {
         onClick={() => {
           // Open to the options step; the user picks settings then hits 开始导出.
           const bridge = window.electronRender;
-          setPhase(bridge?.isAvailable ? "idle" : "unsupported");
+          const hasCustomEnding =
+            useEditor.getState().config.ending.video.asset.kind === "upload";
+          setPhase(
+            !bridge?.isAvailable
+              ? "unsupported"
+              : !bridge.supportsEndingVideo && hasCustomEnding
+                ? "outdated"
+                : "idle",
+          );
           setCanPickOptions(!!bridge?.supportsExportOptions);
           setOpen(true);
         }}
@@ -188,6 +204,10 @@ export function ExportDialog() {
                   网页版用于编辑与实时预览；请打开桌面版后点击导出。
                 </p>
               </div>
+            ) : phase === "outdated" ? (
+              <p className="rounded-lg border border-border border-l-2 border-l-amber-400 bg-muted/40 p-3 text-[13px] leading-relaxed text-muted-foreground">
+                当前桌面版版本较旧，无法导出你替换的片尾视频。请先更新桌面版后再导出；使用内置默认片尾不受影响。
+              </p>
             ) : (
               <>
                 <p className="rounded-lg border border-border border-l-2 border-l-[#7c5cff] bg-muted/40 p-3 text-[11px] leading-relaxed text-muted-foreground">

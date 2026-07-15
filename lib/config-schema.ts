@@ -32,6 +32,21 @@ export const AssetRef = z.object({
 });
 export type AssetRef = z.infer<typeof AssetRef>;
 
+export const DEFAULT_ENDING_ASSET_ID = "flowprompter-outro";
+export const DEFAULT_ENDING_DURATION_SEC = 2.227664;
+
+const defaultEnding = () => ({
+  video: {
+    asset: {
+      kind: "builtin" as const,
+      id: DEFAULT_ENDING_ASSET_ID,
+      mime: "video/mp4",
+      durationSec: DEFAULT_ENDING_DURATION_SEC,
+    },
+    keepAudio: true,
+  },
+});
+
 export const ProjectConfig = z.object({
   version: z.literal(1),
   canvas: z.object({
@@ -88,6 +103,18 @@ export const ProjectConfig = z.object({
       .nullable()
       .default(null),
   }),
+
+  // The fixed ending is additive and defaults as a whole so version-1 configs
+  // saved before the ending shipped keep their opening/content unchanged while
+  // automatically gaining the built-in FlowPrompter outro.
+  ending: z
+    .object({
+      video: z.object({
+        asset: AssetRef,
+        keepAudio: z.boolean().default(true),
+      }),
+    })
+    .default(defaultEnding()),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfig>;
@@ -139,5 +166,6 @@ export function makeDefaultConfig(): ProjectConfig {
       },
       bgm: { asset: { kind: "builtin", id: "airport-bgm" }, volume: 1 },
     },
+    ending: defaultEnding(),
   };
 }

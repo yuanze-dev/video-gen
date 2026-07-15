@@ -7,6 +7,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Uploader } from "./Uploader";
+import { StagePanel } from "./StagePanel";
 import { useEditor } from "@/lib/store";
 
 const num = (v: number | readonly number[]) => (Array.isArray(v) ? v[0] : (v as number));
@@ -25,18 +26,16 @@ export function ContentPanel() {
   const setView = useEditor((s) => s.setView);
 
   return (
-    <section className="rounded-2xl border border-border bg-card p-5">
-      <header className="mb-4 flex items-center gap-2.5">
-        <span className="grid size-5 place-items-center rounded-full bg-[#ff2d7e] text-[11px] font-bold text-white">
-          2
-        </span>
-        <h2 className="text-sm font-semibold">正片</h2>
-      </header>
-
+    <StagePanel
+      stage="content"
+      step={2}
+      title="正片"
+      description="背景画面、提词内容与背景音乐"
+    >
       <div className="space-y-5">
         <div className="space-y-2">
           <Label className="text-xs">背景图</Label>
-          <Uploader target="background" accept="image/*" icon={<ImageIcon className="size-4" />} defaultName="机场登机口（内置）" hint="点击上传图片" />
+          <Uploader target="background" accept="image/*" icon={<ImageIcon className="size-4" />} defaultName="机场登机口" hint="点击上传图片替换" builtin />
         </div>
 
         <div className="space-y-2">
@@ -73,7 +72,7 @@ export function ContentPanel() {
             </div>
           ) : (
             <div className="space-y-3 pt-1">
-              <Uploader target="teleVideo" accept="video/*" icon={<Film className="size-4" />} defaultName="未上传视频" hint="点击上传视频" />
+              <Uploader target="teleVideo" accept="video/*" icon={<Film className="size-4" />} defaultName="未上传视频" hint="点击上传视频" resetLabel="移除视频" />
               <div className="flex items-center justify-between">
                 <span className="text-[13px]">保留视频原声</span>
                 <Switch checked={keepAudio} onCheckedChange={setKeepAudio} />
@@ -84,7 +83,7 @@ export function ContentPanel() {
 
         <div className="space-y-2">
           <Label className="text-xs">背景音乐</Label>
-          <Uploader target="bgm" accept="audio/*" icon={<Music className="size-4" />} defaultName={bgm ? "默认背景音乐" : "无背景音乐"} hint="点击上传音频" />
+          <Uploader target="bgm" accept="audio/*" icon={<Music className="size-4" />} defaultName={bgm ? "默认背景音乐" : "无背景音乐"} hint="点击上传音频替换" builtin />
           {bgm ? (
             <div className="flex items-center gap-3 pt-1">
               <span className="w-16 text-[11px] text-muted-foreground">音量</span>
@@ -94,6 +93,6 @@ export function ContentPanel() {
           ) : null}
         </div>
       </div>
-    </section>
+    </StagePanel>
   );
 }

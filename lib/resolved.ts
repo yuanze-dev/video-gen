@@ -1,4 +1,8 @@
-import type { ProjectConfig } from "./config-schema";
+import {
+  DEFAULT_ENDING_ASSET_ID,
+  DEFAULT_ENDING_DURATION_SEC,
+  type ProjectConfig,
+} from "./config-schema";
 
 // The Remotion composition never sees AssetRef ids — only resolved sources.
 // `builtin: true` means "draw the built-in placeholder"; `src` is a usable URL
@@ -45,6 +49,9 @@ export type ResolvedConfig = {
     };
     bgm: { asset: ResolvedAsset; volume: number } | null;
   };
+  ending: {
+    video: { asset: ResolvedAsset; keepAudio: boolean };
+  };
 };
 
 type Transform = { x: number; y: number; scale: number; rotation: number; flipH: boolean; flipV: boolean };
@@ -54,9 +61,25 @@ type UrlMap = Record<string, string | undefined>;
 function resolveAsset(
   ref: { kind: "builtin" | "upload"; id: string; durationSec?: number } | null | undefined,
   urls: UrlMap,
+  fallback?: { id: string; durationSec?: number },
 ): ResolvedAsset {
-  if (!ref) return { builtin: true, src: null };
+  if (!ref) {
+    return {
+      builtin: true,
+      src: null,
+      builtinId: fallback?.id,
+      durationSec: fallback?.durationSec,
+    };
+  }
   const url = ref.kind === "upload" ? urls[ref.id] : undefined;
+  if (ref.kind === "upload" && !url && fallback) {
+    return {
+      builtin: true,
+      src: null,
+      builtinId: fallback.id,
+      durationSec: fallback.durationSec,
+    };
+  }
   // Uploads with a missing URL (e.g. after reload, blob gone) fall back to builtin.
   return {
     builtin: ref.kind !== "upload" || !url,
@@ -113,6 +136,15 @@ export function resolveConfig(cfg: ProjectConfig, urls: UrlMap): ResolvedConfig 
       bgm: cfg.content.bgm
         ? { asset: resolveAsset(cfg.content.bgm.asset, urls), volume: cfg.content.bgm.volume }
         : null,
+    },
+    ending: {
+      video: {
+        asset: resolveAsset(cfg.ending.video.asset, urls, {
+          id: DEFAULT_ENDING_ASSET_ID,
+          durationSec: DEFAULT_ENDING_DURATION_SEC,
+        }),
+        keepAudio: cfg.ending.video.keepAudio,
+      },
     },
   };
 }
