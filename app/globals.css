@@ -141,6 +141,15 @@
 
 }
 
+@keyframes update-indeterminate {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(410%);
+  }
+}
+
 .editor-scrollbar {
   scrollbar-color: color-mix(in oklch, var(--foreground) 14%, transparent) transparent;
   scrollbar-width: thin;

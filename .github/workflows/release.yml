@@ -58,10 +58,11 @@ jobs:
       - name: Ensure headless Chromium (chrome-headless-shell)
         run: node scripts/ensure-chrome.mjs
 
-      - name: Build Remotion site + Electron bundles
+      - name: Verify Web, updater and Electron bundles
         run: |
-          npm run build:remotion-site
+          npm run build
           npm run typecheck:electron
+          npm run typecheck:tests
           npm run test:update
           npm run build:electron
 

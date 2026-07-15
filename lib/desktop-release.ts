@@ -20,8 +20,8 @@ export function isDesktopReleaseReady({
   );
 }
 
-export function selectDesktopRelease<T extends { required: boolean }>(
+export function selectDesktopRelease<T extends { available: boolean }>(
   candidates: readonly [T, ...T[]],
 ): T {
-  return candidates.find((candidate) => candidate.required) ?? candidates[candidates.length - 1];
+  return candidates.find((candidate) => candidate.available) ?? candidates[candidates.length - 1];
 }

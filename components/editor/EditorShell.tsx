@@ -5,7 +5,6 @@ import { TopBar } from "./TopBar";
 import { OpeningPanel } from "./OpeningPanel";
 import { ContentPanel } from "./ContentPanel";
 import { EndingPanel } from "./EndingPanel";
-import { RequiredUpdateGate } from "./RequiredUpdateGate";
 import { Preview } from "@/components/preview/Preview";
 import { useEditor } from "@/lib/store";
 import { ProjectConfig } from "@/lib/config-schema";
@@ -73,7 +72,6 @@ export function EditorShell() {
           <Preview />
         </main>
       </div>
-      <RequiredUpdateGate />
     </div>
   );
 }

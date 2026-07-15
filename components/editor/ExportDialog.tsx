@@ -140,6 +140,7 @@ export function ExportDialog() {
     try {
       if (bridge.beginExportSession) {
         const reservation = await bridge.beginExportSession();
+        if (!reservation.ok) throw new Error(reservation.error);
         sessionRef.current = reservation.sessionId;
       }
       const { config, assetUrls, fileNames } = editor;

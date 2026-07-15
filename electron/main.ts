@@ -19,6 +19,11 @@ import {
   type RenderRequest,
 } from "./render";
 import { initAutoUpdate } from "./updater";
+import { updateRestartGuard } from "./update-restart-guard";
+import {
+  beginExportWithUpdateInterlock,
+  startRenderWithUpdateInterlock,
+} from "./update-export-interlock";
 
 // In the packaged app, node_modules lives inside app.asar (read-only, can't
 // execute binaries) and the chromium download dir isn't writable. Point Remotion
@@ -122,10 +127,11 @@ function createWindow() {
 
 // ---- IPC: render bridge -----------------------------------------------------
 
-ipcMain.handle("render:session-begin", (event) => ({
-  ok: true as const,
-  sessionId: beginExportSession(event.sender.id),
-}));
+ipcMain.handle("render:session-begin", (event) => {
+  return beginExportWithUpdateInterlock(updateRestartGuard, () =>
+    beginExportSession(event.sender.id),
+  );
+});
 
 ipcMain.handle("render:session-end", (event, sessionId: string) => {
   if (typeof sessionId === "string") endExportSession(sessionId, event.sender.id);
@@ -148,12 +154,14 @@ ipcMain.handle("render:start", async (event, payload: RenderRequest) => {
       throw new Error("serveUrl 不在可信来源内");
     }
     const sender = event.sender;
-    const result = await startRender(
-      payload,
-      (progress) => {
-        if (!sender.isDestroyed()) sender.send("render:progress", progress);
-      },
-      sender.id,
+    const result = await startRenderWithUpdateInterlock(updateRestartGuard, () =>
+      startRender(
+        payload,
+        (progress) => {
+          if (!sender.isDestroyed()) sender.send("render:progress", progress);
+        },
+        sender.id,
+      ),
     );
     return { ok: true as const, jobId: result.jobId };
   } catch (e) {
