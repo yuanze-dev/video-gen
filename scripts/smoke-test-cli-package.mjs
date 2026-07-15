@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const shouldRender = process.argv.includes("--render");
 const skipBuild = process.argv.includes("--skip-build");
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmCli = process.env.npm_execpath;
 
 function execute(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -35,6 +35,14 @@ function execute(command, args, options = {}) {
   });
 }
 
+function executeNpm(args, options = {}) {
+  if (npmCli) return execute(process.execPath, [npmCli, ...args], options);
+  if (process.platform === "win32") {
+    throw new Error("Windows 上请通过 npm run smoke:cli 调用此脚本");
+  }
+  return execute("npm", args, options);
+}
+
 function parseEnvelope(output, command) {
   const envelope = JSON.parse(output);
   if (envelope?.ok !== true || envelope?.protocolVersion !== "1") {
@@ -56,13 +64,16 @@ try {
     `${JSON.stringify({ private: true, name: "littlestart-empty-smoke" }, null, 2)}\n`,
   );
 
-  const packed = await execute(
-    npm,
-    ["pack", path.join(root, "packages", "littlestart-cli"), "--json", "--pack-destination", packDir],
-  );
+  const packed = await executeNpm([
+    "pack",
+    path.join(root, "packages", "littlestart-cli"),
+    "--json",
+    "--pack-destination",
+    packDir,
+  ]);
   const packResult = JSON.parse(packed.stdout);
   const tarball = path.join(packDir, packResult[0].filename);
-  await execute(npm, ["install", tarball, "--ignore-scripts", "--no-audit", "--no-fund"], {
+  await executeNpm(["install", tarball, "--ignore-scripts", "--no-audit", "--no-fund"], {
     cwd: projectDir,
   });
 
