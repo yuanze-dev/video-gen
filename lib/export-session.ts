@@ -1,21 +1,52 @@
 import { useSyncExternalStore } from "react";
 
-let active = false;
-const listeners = new Set<() => void>();
+export type ExportSessionActivityStore = {
+  acquire: () => () => void;
+  subscribe: (listener: () => void) => () => void;
+  getSnapshot: () => boolean;
+};
 
-export function setExportSessionActive(next: boolean): void {
-  if (active === next) return;
-  active = next;
-  for (const listener of listeners) listener();
+export function createExportSessionActivityStore(): ExportSessionActivityStore {
+  const leases = new Set<symbol>();
+  const listeners = new Set<() => void>();
+  const notify = () => {
+    for (const listener of listeners) listener();
+  };
+
+  return {
+    acquire: () => {
+      const lease = Symbol("export-session");
+      const wasActive = leases.size > 0;
+      leases.add(lease);
+      if (!wasActive) notify();
+
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const wasActiveBeforeRelease = leases.size > 0;
+        leases.delete(lease);
+        if (wasActiveBeforeRelease && leases.size === 0) notify();
+      };
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    getSnapshot: () => leases.size > 0,
+  };
+}
+
+const exportSessionActivity = createExportSessionActivityStore();
+
+export function acquireExportSessionActivity(): () => void {
+  return exportSessionActivity.acquire();
 }
 
 export function useExportSessionActive(): boolean {
   return useSyncExternalStore(
-    (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    () => active,
+    exportSessionActivity.subscribe,
+    exportSessionActivity.getSnapshot,
     () => false,
   );
 }

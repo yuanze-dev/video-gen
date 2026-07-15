@@ -205,9 +205,10 @@ app.whenReady().then(() => {
   // The editor UI is dark-only; force native chrome (traffic lights on hover,
   // context menus, the save dialog) to match so nothing flashes light.
   nativeTheme.themeSource = "dark";
-  createWindow();
-  // Keep the desktop shell current: background download + idle restart prompt.
+  // Register updater IPC before loading the remote page so hydration can never
+  // race ahead of the main-process handlers.
   initAutoUpdate(() => mainWindow);
+  createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

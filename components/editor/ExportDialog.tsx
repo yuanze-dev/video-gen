@@ -8,40 +8,11 @@ import { Progress } from "@/components/ui/progress";
 import { useEditor } from "@/lib/store";
 import type { ProjectConfig } from "@/lib/config-schema";
 import { DEFAULT_EXPORT_OPTIONS, type ExportOptions } from "@/lib/export-options";
-import { setExportSessionActive } from "@/lib/export-session";
+import { acquireExportSessionActivity } from "@/lib/export-session";
+import type { DesktopRenderAsset } from "@/lib/desktop-bridge";
 import { ExportOptionsForm } from "./ExportOptions";
 
 type Phase = "idle" | "working" | "done" | "error" | "unsupported" | "outdated";
-
-// The render bridge injected by the Electron preload (absent in a plain browser).
-type RenderAsset = { id: string; name: string; mime: string; data: ArrayBuffer };
-type ElectronRender = {
-  isAvailable: boolean;
-  supportsExportOptions?: boolean; // absent on shells older than the export-options release
-  supportsEndingVideo?: boolean; // absent on shells older than the ending-video release
-  beginExportSession?: () => Promise<{ ok: true; sessionId: string }>;
-  endExportSession?: (sessionId: string) => Promise<{ ok: true }>;
-  render: (p: {
-    serveUrl: string;
-    config: unknown;
-    assets: RenderAsset[];
-    options: ExportOptions;
-    sessionId?: string;
-  }) => Promise<{ ok: true; jobId: string } | { ok: false; error: string }>;
-  onProgress: (cb: (progress: number) => void) => () => void;
-  save: (
-    jobId: string,
-    kind: "video" | "cover",
-  ) => Promise<{ ok: true; path: string } | { ok: false; canceled?: boolean; error?: string }>;
-  reveal: (filePath: string) => Promise<{ ok: true }>;
-  cleanup: (jobId: string) => Promise<{ ok: true }>;
-};
-
-declare global {
-  interface Window {
-    electronRender?: ElectronRender;
-  }
-}
 
 function referencedUploadIds(cfg: ProjectConfig): string[] {
   const ids: string[] = [];
@@ -62,8 +33,8 @@ async function collectAssets(
   cfg: ProjectConfig,
   assetUrls: Record<string, string>,
   fileNames: Record<string, string>,
-): Promise<RenderAsset[]> {
-  const assets: RenderAsset[] = [];
+): Promise<DesktopRenderAsset[]> {
+  const assets: DesktopRenderAsset[] = [];
   for (const id of referencedUploadIds(cfg)) {
     const objUrl = assetUrls[id];
     if (!objUrl) continue;
@@ -93,6 +64,8 @@ export function ExportDialog() {
   const unsubRef = useRef<(() => void) | null>(null);
   const jobRef = useRef<string | null>(null);
   const sessionRef = useRef<string | null>(null);
+  const activityReleaseRef = useRef<(() => void) | null>(null);
+  const mountedRef = useRef(false);
 
   const cleanup = () => {
     unsubRef.current?.();
@@ -103,30 +76,38 @@ export function ExportDialog() {
   const discardJob = async () => {
     const id = jobRef.current;
     const sessionId = sessionRef.current;
+    const releaseActivity = activityReleaseRef.current;
     jobRef.current = null;
     sessionRef.current = null;
+    activityReleaseRef.current = null;
     try {
       if (sessionId) await window.electronRender?.endExportSession?.(sessionId);
       if (id) await window.electronRender?.cleanup(id);
     } finally {
-      setExportSessionActive(false);
+      releaseActivity?.();
     }
   };
   useEffect(
-    () => () => {
-      cleanup();
-      const id = jobRef.current;
-      const sessionId = sessionRef.current;
-      jobRef.current = null;
-      sessionRef.current = null;
-      void (async () => {
-        try {
-          if (sessionId) await window.electronRender?.endExportSession?.(sessionId);
-          if (id) await window.electronRender?.cleanup(id);
-        } finally {
-          setExportSessionActive(false);
-        }
-      })();
+    () => {
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
+        cleanup();
+        const id = jobRef.current;
+        const sessionId = sessionRef.current;
+        const releaseActivity = activityReleaseRef.current;
+        jobRef.current = null;
+        sessionRef.current = null;
+        activityReleaseRef.current = null;
+        void (async () => {
+          try {
+            if (sessionId) await window.electronRender?.endExportSession?.(sessionId);
+            if (id) await window.electronRender?.cleanup(id);
+          } finally {
+            releaseActivity?.();
+          }
+        })();
+      };
     },
     [],
   );
@@ -146,7 +127,9 @@ export function ExportDialog() {
 
     cleanup();
     await discardJob();
-    setExportSessionActive(true);
+    if (!mountedRef.current) return;
+    const releaseActivity = acquireExportSessionActivity();
+    activityReleaseRef.current = releaseActivity;
     setPhase("working");
     setProgress(0);
     setSavedPath(null);
@@ -180,7 +163,8 @@ export function ExportDialog() {
         const sessionId = sessionRef.current;
         sessionRef.current = null;
         if (sessionId) await bridge.endExportSession?.(sessionId);
-        setExportSessionActive(false);
+        if (activityReleaseRef.current === releaseActivity) activityReleaseRef.current = null;
+        releaseActivity();
         setStat(res.error || "渲染失败");
         setPhase("error");
         return;
@@ -196,7 +180,8 @@ export function ExportDialog() {
       const sessionId = sessionRef.current;
       sessionRef.current = null;
       if (sessionId) await bridge.endExportSession?.(sessionId).catch(() => {});
-      setExportSessionActive(false);
+      if (activityReleaseRef.current === releaseActivity) activityReleaseRef.current = null;
+      releaseActivity();
       setStat(e instanceof Error ? e.message : "渲染失败");
       setPhase("error");
     }

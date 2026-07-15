@@ -46,12 +46,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify tag matches package version
+        if: github.ref_type == 'tag'
+        run: |
+          EXPECTED="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$EXPECTED" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package version $EXPECTED"
+            exit 1
+          fi
+
       - name: Ensure headless Chromium (chrome-headless-shell)
         run: node scripts/ensure-chrome.mjs
 
       - name: Build Remotion site + Electron bundles
         run: |
           npm run build:remotion-site
+          npm run typecheck:electron
+          npm run test:update
           npm run build:electron
 
       # One step does it all now that auto-update is in play:
