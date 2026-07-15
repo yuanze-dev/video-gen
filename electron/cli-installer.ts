@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import crypto from "node:crypto";
-import { existsSync } from "node:fs";
+import { constants, existsSync } from "node:fs";
 import fs from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import type {
   DesktopCliInstallResult,
@@ -15,7 +16,7 @@ export const CLI_PROFILE_END = "# <<< littlestart CLI <<<";
 type RunExecutable = (
   executable: string,
   args: readonly string[],
-  options: { cwd: string; timeoutMs: number },
+  options: { cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 type CliInstallerOptions = {
@@ -27,6 +28,16 @@ type CliInstallerOptions = {
   resourcesPath: string;
   cliRoot: string;
   runExecutable?: RunExecutable;
+  testHooks?: {
+    beforeLauncherInspect?: (file: string) => Promise<void>;
+    beforeLauncherWrite?: (file: string) => Promise<void>;
+    afterLauncherPublish?: (file: string) => Promise<void>;
+    beforeProfilePublish?: (file: string) => Promise<void>;
+    afterProfilePublish?: (file: string) => Promise<void>;
+    beforeQuarantineCleanup?: (file: string) => Promise<void>;
+    beforeFinalStateCheck?: () => Promise<void>;
+    beforeStaleLockReclaim?: (createSuccessor: () => Promise<string>) => Promise<void>;
+  };
 };
 
 type LauncherInspection =
@@ -36,6 +47,7 @@ type LauncherInspection =
   | { kind: "conflict" };
 
 type LauncherBackup = {
+  bytes: Buffer;
   content: string;
   mode: number;
   device: number;
@@ -44,13 +56,51 @@ type LauncherBackup = {
   modifiedMs: number;
 } | null;
 
+type LauncherSnapshot = Exclude<LauncherBackup, null>;
+
+type LauncherMutationReceipt = {
+  // Registered by the caller before the first directory mutation. Old and new
+  // launcher inodes are immutable; only their directory entries move.
+  file: string;
+  previous: LauncherBackup;
+  quarantinePath: string | null;
+  published: LauncherSnapshot | null;
+};
+
+type ProfileMutationReceipt = LauncherMutationReceipt;
+
+type MutationOutcome = {
+  ok: boolean;
+  retainedPaths: string[];
+};
+
+type ManagedPathPlan =
+  | { configured: true; warning?: string; needsPublish?: false }
+  | { configured: false; warning: string; needsPublish?: false }
+  | {
+      configured: true;
+      needsPublish: true;
+      warning?: undefined;
+      previous: LauncherBackup;
+      content: Buffer;
+      mode: number;
+    };
+
+type InstallPlan = {
+  state: DesktopCliInstallState;
+  fingerprint: string;
+};
+
 const MAX_PROFILE_BYTES = 1024 * 1024;
+const MAX_LAUNCHER_BYTES = 256 * 1024;
 const VERIFY_TIMEOUT_MS = 60_000;
+const INSTALL_LOCK_STALE_MS = 10 * 60 * 1000;
+const INSTALL_LOCK_GENERATION = /^generation-([0-9a-f]{12})$/;
 
 function runExecutableDefault(
   executable: string,
   args: readonly string[],
-  options: { cwd: string; timeoutMs: number },
+  options: { cwd: string; timeoutMs: number; env: NodeJS.ProcessEnv },
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(
@@ -59,7 +109,7 @@ function runExecutableDefault(
       {
         cwd: options.cwd,
         encoding: "utf8",
-        env: process.env,
+        env: options.env,
         maxBuffer: 1024 * 1024,
         timeout: options.timeoutMs,
       },
@@ -131,6 +181,72 @@ function pathContains(pathEnv: string, binDir: string): boolean {
     .some((entry) => path.resolve(entry) === path.resolve(binDir));
 }
 
+async function readHandleBytes(handle: FileHandle, size: number): Promise<Buffer> {
+  const buffer = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const { bytesRead } = await handle.read(buffer, offset, size - offset, offset);
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return buffer.subarray(0, offset);
+}
+
+async function snapshotHandle(
+  handle: FileHandle,
+  maxBytes: number,
+): Promise<LauncherSnapshot | null> {
+  const before = await handle.stat();
+  if (!before.isFile() || before.size > maxBytes) return null;
+  const bytes = await readHandleBytes(handle, before.size);
+  const after = await handle.stat();
+  if (
+    bytes.length !== before.size ||
+    after.dev !== before.dev ||
+    after.ino !== before.ino ||
+    after.size !== before.size ||
+    after.mtimeMs !== before.mtimeMs
+  ) {
+    return null;
+  }
+  return {
+    bytes,
+    content: bytes.toString("utf8"),
+    mode: after.mode & 0o7777,
+    device: after.dev,
+    inode: after.ino,
+    size: after.size,
+    modifiedMs: after.mtimeMs,
+  };
+}
+
+function sameSnapshot(left: LauncherSnapshot, right: LauncherSnapshot): boolean {
+  return (
+    left.device === right.device &&
+    left.inode === right.inode &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.modifiedMs === right.modifiedMs &&
+    left.bytes.equals(right.bytes)
+  );
+}
+
+async function readSnapshotAtPath(
+  file: string,
+  maxBytes: number,
+): Promise<LauncherSnapshot | "missing" | null> {
+  let handle: FileHandle | null = null;
+  try {
+    handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    return await snapshotHandle(handle, maxBytes);
+  } catch (error) {
+    if (isMissing(error)) return "missing";
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
 async function isRegularFile(file: string): Promise<boolean> {
   try {
     return (await fs.lstat(file)).isFile();
@@ -140,12 +256,12 @@ async function isRegularFile(file: string): Promise<boolean> {
   }
 }
 
-async function atomicWrite(
+async function exclusivePublish(
   file: string,
-  content: string,
+  content: string | Buffer,
   mode: number,
-  options: { exclusive?: boolean } = {},
-): Promise<void> {
+  maxBytes: number,
+): Promise<LauncherSnapshot> {
   const temporary = path.join(
     path.dirname(file),
     `.${path.basename(file)}.littlestart-${process.pid}-${crypto.randomUUID()}.tmp`,
@@ -153,93 +269,288 @@ async function atomicWrite(
   try {
     await fs.writeFile(temporary, content, { encoding: "utf8", flag: "wx", mode });
     await fs.chmod(temporary, mode);
-    if (options.exclusive) await fs.link(temporary, file);
-    else await fs.rename(temporary, file);
+    const snapshot = await readSnapshotAtPath(temporary, maxBytes);
+    if (!snapshot || snapshot === "missing") throw new Error("VERIFY_FAILED");
+    await fs.link(temporary, file);
+    return snapshot;
   } finally {
     await fs.rm(temporary, { force: true }).catch(() => {});
   }
 }
 
-async function acquireInstallLock(lockPath: string): Promise<() => Promise<void>> {
-  const token = `${process.pid}:${crypto.randomUUID()}`;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await fs.open(lockPath, "wx", 0o600);
-      try {
-        await handle.writeFile(`${token}\n`, "utf8");
-      } catch (error) {
-        await handle.close().catch(() => {});
-        await fs.rm(lockPath, { force: true }).catch(() => {});
-        throw error;
-      }
-      await handle.close();
-      return async () => {
-        try {
-          if ((await fs.readFile(lockPath, "utf8")).trim() === token) {
-            await fs.rm(lockPath, { force: true });
-          }
-        } catch {
-          // A missing/replaced lock belongs to no active operation here.
-        }
-      };
-    } catch (error) {
-      if (!hasErrorCode(error, "EEXIST")) throw error;
-      try {
-        const [stat, content] = await Promise.all([
-          fs.lstat(lockPath),
-          fs.readFile(lockPath, "utf8"),
-        ]);
-        if (
-          stat.isFile() &&
-          !stat.isSymbolicLink() &&
-          Date.now() - stat.mtimeMs > 10 * 60 * 1000
-        ) {
-          const unchanged = (await fs.readFile(lockPath, "utf8")) === content;
-          if (unchanged) {
-            await fs.rm(lockPath);
-            continue;
-          }
-        }
-      } catch {
-        continue;
-      }
-      throw new Error("INSTALL_BUSY");
-    }
-  }
-  throw new Error("INSTALL_BUSY");
+type InstallLockRecord = {
+  token: string;
+  status: "active" | "released";
+  updatedAt: string;
+};
+
+type InstallLockLease = {
+  generation: number;
+  directory: string;
+  token: string;
+  handle: FileHandle;
+};
+
+function installLockGenerationName(generation: number): string {
+  return `generation-${generation.toString(16).padStart(12, "0")}`;
 }
 
-async function readSmallProfile(profilePath: string): Promise<string | null> {
-  try {
-    const stat = await fs.lstat(profilePath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_PROFILE_BYTES) return null;
-    return await fs.readFile(profilePath, "utf8");
-  } catch (error) {
-    if (isMissing(error)) return "";
-    return null;
+async function writeInstallLockRecord(
+  handle: FileHandle,
+  record: InstallLockRecord,
+): Promise<void> {
+  const content = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+  let offset = 0;
+  while (offset < content.length) {
+    const { bytesWritten } = await handle.write(
+      content,
+      offset,
+      content.length - offset,
+      offset,
+    );
+    if (bytesWritten === 0) throw new Error("INSTALL_LOCK_SHORT_WRITE");
+    offset += bytesWritten;
   }
+  await handle.truncate(content.length);
+  await handle.sync();
+}
+
+async function latestInstallLockGeneration(
+  lockPath: string,
+): Promise<{ generation: number; directory: string } | null> {
+  let latest: number | null = null;
+  for (const entry of await fs.readdir(lockPath)) {
+    const match = INSTALL_LOCK_GENERATION.exec(entry);
+    if (!match) continue;
+    const generation = Number.parseInt(match[1], 16);
+    if (latest === null || generation > latest) latest = generation;
+  }
+  return latest === null
+    ? null
+    : {
+        generation: latest,
+        directory: path.join(lockPath, installLockGenerationName(latest)),
+      };
+}
+
+async function inspectInstallLockGeneration(
+  directory: string,
+): Promise<{ released: boolean; stale: boolean }> {
+  const directoryStat = await fs.lstat(directory);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+    return { released: false, stale: false };
+  }
+
+  const ownerPath = path.join(directory, "owner.json");
+  let ownerHandle: FileHandle | null = null;
+  try {
+    ownerHandle = await fs.open(ownerPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const ownerSnapshot = await snapshotHandle(ownerHandle, 4096);
+    if (!ownerSnapshot) return { released: false, stale: false };
+    let record: Partial<InstallLockRecord> = {};
+    try {
+      record = JSON.parse(ownerSnapshot.content) as Partial<InstallLockRecord>;
+    } catch {}
+    const validRecord =
+      typeof record.token === "string" &&
+      record.token.length > 0 &&
+      (record.status === "active" || record.status === "released");
+    if (!validRecord) {
+      return {
+        released: false,
+        stale:
+          Date.now() - Math.max(directoryStat.mtimeMs, ownerSnapshot.modifiedMs) >
+          INSTALL_LOCK_STALE_MS,
+      };
+    }
+    return {
+      released: record.status === "released",
+      stale:
+        record.status === "active" &&
+        Date.now() - Math.max(directoryStat.mtimeMs, ownerSnapshot.modifiedMs) >
+          INSTALL_LOCK_STALE_MS,
+    };
+  } catch (error) {
+    if (!isMissing(error)) return { released: false, stale: false };
+    return {
+      released: false,
+      stale: Date.now() - directoryStat.mtimeMs > INSTALL_LOCK_STALE_MS,
+    };
+  } finally {
+    await ownerHandle?.close().catch(() => {});
+  }
+}
+
+async function createInstallLockLease(
+  lockPath: string,
+  generation: number,
+): Promise<InstallLockLease> {
+  const directory = path.join(lockPath, installLockGenerationName(generation));
+  await fs.mkdir(directory, { mode: 0o700 });
+  const token = `${process.pid}:${crypto.randomUUID()}`;
+  let handle: FileHandle | null = null;
+  try {
+    handle = await fs.open(path.join(directory, "owner.json"), "wx+", 0o600);
+    await writeInstallLockRecord(handle, {
+      token,
+      status: "active",
+      updatedAt: new Date().toISOString(),
+    });
+    return { generation, directory, token, handle };
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    throw error;
+  }
+}
+
+async function acquireInstallLock(
+  lockPath: string,
+  testHooks: CliInstallerOptions["testHooks"] = {},
+): Promise<() => Promise<void>> {
+  try {
+    await fs.mkdir(lockPath, { mode: 0o700 });
+  } catch (error) {
+    if (!hasErrorCode(error, "EEXIST")) throw error;
+    const stat = await fs.lstat(lockPath);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("INSTALL_BUSY");
+  }
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const latest = await latestInstallLockGeneration(lockPath);
+    let generation = 0;
+    if (latest) {
+      const inspection = await inspectInstallLockGeneration(latest.directory);
+      if (!inspection.released && !inspection.stale) throw new Error("INSTALL_BUSY");
+      generation = latest.generation + 1;
+      if (generation > 0xffffffffffff) throw new Error("INSTALL_BUSY");
+      if (inspection.stale) {
+        await testHooks?.beforeStaleLockReclaim?.(async () => {
+          const successor = await createInstallLockLease(lockPath, generation);
+          await successor.handle.close();
+          return successor.directory;
+        });
+      }
+    }
+
+    let lease: InstallLockLease;
+    try {
+      lease = await createInstallLockLease(lockPath, generation);
+    } catch (error) {
+      if (hasErrorCode(error, "EEXIST")) continue;
+      throw error;
+    }
+
+    return async () => {
+      try {
+        await writeInstallLockRecord(lease.handle, {
+          token: lease.token,
+          status: "released",
+          updatedAt: new Date().toISOString(),
+        });
+      } catch {
+        // A failed release remains active until its lease becomes stale.
+      } finally {
+        await lease.handle.close().catch(() => {});
+      }
+    };
+  }
+  throw new Error("INSTALL_BUSY");
 }
 
 function profileBlock(binDir: string): string {
   return `${CLI_PROFILE_START}\nexport PATH=${shellQuote(binDir)}:"$PATH"\n${CLI_PROFILE_END}`;
 }
 
-async function profileHasManagedPath(profilePath: string | null, binDir: string): Promise<boolean> {
-  if (!profilePath) return false;
-  const content = await readSmallProfile(profilePath);
-  if (content === null) return false;
-  return (
-    content.includes(profileBlock(binDir)) ||
-    (content.includes("PATH") &&
-      (content.includes(binDir) || content.includes("$HOME/.local/bin")))
-  );
+function hasExactManagedBlock(content: string, binDir: string): boolean {
+  const lines = content.split(/\r?\n/);
+  const blockLines = profileBlock(binDir).split("\n");
+  let controlDepth = 0;
+  let heredocDelimiter: string | null = null;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const trimmed = line.trim();
+    if (heredocDelimiter) {
+      if (trimmed === heredocDelimiter) heredocDelimiter = null;
+      continue;
+    }
+    if (
+      controlDepth === 0 &&
+      blockLines.every((blockLine, offset) => lines[index + offset] === blockLine)
+    ) {
+      return true;
+    }
+
+    const heredoc = /<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?/.exec(line);
+    if (heredoc) {
+      heredocDelimiter = heredoc[1] ?? null;
+      continue;
+    }
+    if (/^(?:fi|done|esac|})\b/.test(trimmed) || trimmed === "}") {
+      controlDepth = Math.max(0, controlDepth - 1);
+    }
+    if (
+      /^(?:if|for|while|until|case|select)\b/.test(trimmed) ||
+      /^function\s+[A-Za-z_][A-Za-z0-9_]*\b/.test(trimmed) ||
+      /^[A-Za-z_][A-Za-z0-9_]*\s*\(\)\s*\{/.test(trimmed)
+    ) {
+      controlDepth += 1;
+    }
+  }
+  return false;
 }
 
-async function ensureManagedPath(
+async function readSmallProfile(profilePath: string): Promise<LauncherSnapshot | "missing" | null> {
+  return readSnapshotAtPath(profilePath, MAX_PROFILE_BYTES);
+}
+
+async function fingerprintFile(file: string, maxBytes: number): Promise<unknown> {
+  let handle: FileHandle | null = null;
+  try {
+    handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const snapshot = await snapshotHandle(handle, maxBytes);
+    return snapshot
+      ? {
+          contentHash: crypto.createHash("sha256").update(snapshot.bytes).digest("hex"),
+          mode: snapshot.mode,
+          device: snapshot.device,
+          inode: snapshot.inode,
+          size: snapshot.size,
+          modifiedMs: snapshot.modifiedMs,
+        }
+      : { kind: "unsafe" };
+  } catch (error) {
+    if (isMissing(error)) return { kind: "missing" };
+    return {
+      kind: "error",
+      code:
+        error && typeof error === "object" && "code" in error ? String(error.code) : "UNKNOWN",
+    };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+function isConfirmableStatus(status: DesktopCliInstallState["status"]): boolean {
+  return status === "not-installed" || status === "repair-needed" || status === "installed";
+}
+
+async function profileHasManagedPath(
+  profilePath: string | null,
+  binDir: string,
+): Promise<boolean> {
+  if (!profilePath) return false;
+  const profile = await readSmallProfile(profilePath);
+  return profile !== null && profile !== "missing"
+    ? hasExactManagedBlock(profile.content, binDir)
+    : false;
+}
+
+async function planManagedPath(
   profilePath: string | null,
   binDir: string,
   pathEnv: string,
-): Promise<{ configured: boolean; warning?: string }> {
+): Promise<ManagedPathPlan> {
   if (pathContains(pathEnv, binDir)) return { configured: true };
   if (!profilePath) {
     return {
@@ -248,16 +559,15 @@ async function ensureManagedPath(
     };
   }
 
-  const content = await readSmallProfile(profilePath);
-  if (content === null) {
+  const snapshot = await readSmallProfile(profilePath);
+  if (snapshot === null) {
     return {
       configured: false,
       warning: `CLI 已安装，但 ${profilePath} 不是可安全修改的普通文件，请手动配置 PATH。`,
     };
   }
-
-  const block = profileBlock(binDir);
-  if (content.includes(block)) return { configured: true };
+  const content = snapshot === "missing" ? "" : snapshot.content;
+  if (hasExactManagedBlock(content, binDir)) return { configured: true };
   if (content.includes(CLI_PROFILE_START) || content.includes(CLI_PROFILE_END)) {
     return {
       configured: false,
@@ -265,16 +575,26 @@ async function ensureManagedPath(
     };
   }
 
-  const prefix = content.length === 0 ? "" : content.endsWith("\n") ? "\n" : "\n\n";
-  try {
-    await fs.appendFile(profilePath, `${prefix}${block}\n`, { encoding: "utf8", mode: 0o644 });
-    return { configured: true };
-  } catch {
-    return {
-      configured: false,
-      warning: `CLI 已安装，但无法修改 ${profilePath}；请手动将 ${binDir} 加入 PATH。`,
-    };
-  }
+  const previousBytes = snapshot === "missing" ? Buffer.alloc(0) : snapshot.bytes;
+  const prefix =
+    previousBytes.length === 0
+      ? ""
+      : previousBytes[previousBytes.length - 1] === 0x0a
+        ? "\n"
+        : "\n\n";
+  return {
+    configured: true,
+    needsPublish: true,
+    previous: snapshot === "missing" ? null : snapshot,
+    content: Buffer.concat([
+      previousBytes,
+      Buffer.from(`${prefix}${profileBlock(binDir)}\n`, "utf8"),
+    ]),
+    // The replacement keeps the exact byte prefix and POSIX mode. Node does
+    // not expose a portable O_NOFOLLOW xattr/ACL clone API, so extended
+    // metadata is intentionally outside this transaction's current scope.
+    mode: snapshot === "missing" ? 0o644 : snapshot.mode,
+  };
 }
 
 function parseVersionOutput(stdout: string, expectedVersion: string): boolean {
@@ -322,6 +642,7 @@ export function createDesktopCliInstaller(options: CliInstallerOptions) {
   const runExecutable = options.runExecutable ?? runExecutableDefault;
   let installInFlight: Promise<DesktopCliInstallResult> | null = null;
   let installingState: DesktopCliInstallState | null = null;
+  const validPlans = new WeakSet<InstallPlan>();
 
   const baseState = (status: DesktopCliInstallState["status"]): DesktopCliInstallState => ({
     status,
@@ -362,20 +683,19 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
     file: string,
     expectedContent: string,
   ): Promise<LauncherInspection> => {
-    try {
-      const stat = await fs.lstat(file);
-      if (!stat.isFile() || stat.isSymbolicLink()) return { kind: "conflict" };
-      const content = await fs.readFile(file, "utf8");
-      if (!isManagedLauncher(content)) return { kind: "conflict" };
-      const common = { content, mode: stat.mode & 0o777, version: readVersionMarker(content) };
-      return withoutLauncherVersion(content) === withoutLauncherVersion(expectedContent) &&
-        (stat.mode & 0o100) !== 0
-        ? { kind: "current", ...common }
-        : { kind: "managed-stale", ...common };
-    } catch (error) {
-      if (isMissing(error)) return { kind: "missing" };
-      throw error;
-    }
+    await options.testHooks?.beforeLauncherInspect?.(file);
+    const snapshot = await readSnapshotAtPath(file, MAX_LAUNCHER_BYTES);
+    if (snapshot === "missing") return { kind: "missing" };
+    if (!snapshot || !isManagedLauncher(snapshot.content)) return { kind: "conflict" };
+    const common = {
+      content: snapshot.content,
+      mode: snapshot.mode,
+      version: readVersionMarker(snapshot.content),
+    };
+    return withoutLauncherVersion(snapshot.content) === withoutLauncherVersion(expectedContent) &&
+      (snapshot.mode & 0o100) !== 0
+      ? { kind: "current", ...common }
+      : { kind: "managed-stale", ...common };
   };
 
   const getState = async (): Promise<DesktopCliInstallState> => {
@@ -467,85 +787,291 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
     }
   };
 
+  const fingerprintState = async (state: DesktopCliInstallState): Promise<string> => {
+    const files = await Promise.all([
+      fingerprintFile(installPath, MAX_LAUNCHER_BYTES),
+      fingerprintFile(aliasPath, MAX_LAUNCHER_BYTES),
+      profilePath
+        ? fingerprintFile(profilePath, MAX_PROFILE_BYTES)
+        : Promise.resolve({ kind: "none" }),
+      fingerprintFile(packageFile, MAX_LAUNCHER_BYTES),
+    ]);
+    return crypto
+      .createHash("sha256")
+      .update(JSON.stringify({ state, files }))
+      .digest("hex");
+  };
+
+  const prepareInstall = async (): Promise<InstallPlan> => {
+    const state = await getState();
+    const plan = { state, fingerprint: await fingerprintState(state) };
+    validPlans.add(plan);
+    return plan;
+  };
+
   const backup = async (file: string): Promise<LauncherBackup> => {
-    try {
-      const stat = await fs.lstat(file);
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("EXISTING_COMMAND_CONFLICT");
-      const content = await fs.readFile(file, "utf8");
-      if (!isManagedLauncher(content)) throw new Error("EXISTING_COMMAND_CONFLICT");
-      return {
-        content,
-        mode: stat.mode & 0o777,
-        device: stat.dev,
-        inode: stat.ino,
-        size: stat.size,
-        modifiedMs: stat.mtimeMs,
-      };
-    } catch (error) {
-      if (isMissing(error)) return null;
-      throw error;
+    const snapshot = await readSnapshotAtPath(file, MAX_LAUNCHER_BYTES);
+    if (snapshot === "missing") return null;
+    if (!snapshot || !isManagedLauncher(snapshot.content)) {
+      throw new Error("EXISTING_COMMAND_CONFLICT");
     }
+    return snapshot;
   };
 
-  const assertTargetUnchanged = async (file: string, previous: LauncherBackup): Promise<void> => {
-    try {
-      const stat = await fs.lstat(file);
-      if (!previous || !stat.isFile() || stat.isSymbolicLink()) {
-        throw new Error("EXISTING_COMMAND_CONFLICT");
-      }
-      if (
-        stat.dev !== previous.device ||
-        stat.ino !== previous.inode ||
-        stat.size !== previous.size ||
-        stat.mtimeMs !== previous.modifiedMs ||
-        (await fs.readFile(file, "utf8")) !== previous.content
-      ) {
-        throw new Error("EXISTING_COMMAND_CONFLICT");
-      }
-    } catch (error) {
-      if (isMissing(error) && previous === null) return;
-      throw error;
-    }
-  };
-
-  const writeLauncher = async (
-    file: string,
-    content: string,
-    previous: LauncherBackup,
-  ): Promise<void> => {
-    await assertTargetUnchanged(file, previous);
-    try {
-      await atomicWrite(file, content, 0o755, { exclusive: previous === null });
-    } catch (error) {
-      if (hasErrorCode(error, "EEXIST")) throw new Error("EXISTING_COMMAND_CONFLICT");
-      throw error;
-    }
-  };
-
-  const restore = async (
-    file: string,
-    previous: LauncherBackup,
-    installedContent: string,
+  const restoreEntryNoClobber = async (
+    quarantinePath: string,
+    targetPath: string,
   ): Promise<boolean> => {
     try {
-      const stat = await fs.lstat(file);
-      if (!stat.isFile() || stat.isSymbolicLink()) return false;
-      if ((await fs.readFile(file, "utf8")) !== installedContent) return false;
-      if (!previous) await fs.rm(file);
-      else await atomicWrite(file, previous.content, previous.mode || 0o755);
+      await fs.link(quarantinePath, targetPath);
+      await fs.unlink(quarantinePath);
       return true;
     } catch {
       return false;
     }
   };
 
-  const performInstall = async (): Promise<DesktopCliInstallResult> => {
-    const initial = await getState();
+  const hiddenRecoveryPath = (file: string, label: string): string => {
+    const basename = path.basename(file);
+    const hiddenBasename = basename.startsWith(".") ? basename : `.${basename}`;
+    return path.join(
+      path.dirname(file),
+      `${hiddenBasename}.littlestart-${label}-${crypto.randomUUID()}`,
+    );
+  };
+
+  const publishImmutableFile = async (
+    receipt: LauncherMutationReceipt,
+    content: string | Buffer,
+    mode: number,
+    maxBytes: number,
+    beforePublish?: (file: string) => Promise<void>,
+    afterPublish?: (file: string) => Promise<void>,
+  ): Promise<LauncherSnapshot> => {
+    await beforePublish?.(receipt.file);
+    if (receipt.previous) {
+      const current = await readSnapshotAtPath(receipt.file, maxBytes);
+      if (!current || current === "missing" || !sameSnapshot(current, receipt.previous)) {
+        throw new Error("EXISTING_COMMAND_CONFLICT");
+      }
+      // Moving first gives us a CAS-like boundary: verify exactly what rename
+      // captured, then publish the replacement with link(2) no-clobber.
+      const quarantinePath = hiddenRecoveryPath(receipt.file, "previous");
+      try {
+        await fs.rename(receipt.file, quarantinePath);
+        receipt.quarantinePath = quarantinePath;
+      } catch (error) {
+        if (isMissing(error)) throw new Error("EXISTING_COMMAND_CONFLICT");
+        throw error;
+      }
+      const moved = await readSnapshotAtPath(quarantinePath, maxBytes);
+      if (!moved || moved === "missing" || !sameSnapshot(moved, receipt.previous)) {
+        if (await restoreEntryNoClobber(quarantinePath, receipt.file)) {
+          receipt.quarantinePath = null;
+        }
+        throw new Error("EXISTING_COMMAND_CONFLICT");
+      }
+    }
+
+    try {
+      receipt.published = await exclusivePublish(receipt.file, content, mode, maxBytes);
+    } catch (error) {
+      if (hasErrorCode(error, "EEXIST")) throw new Error("EXISTING_COMMAND_CONFLICT");
+      throw error;
+    }
+    await afterPublish?.(receipt.file);
+    const installed = await readSnapshotAtPath(receipt.file, maxBytes);
+    if (!installed || installed === "missing" || !sameSnapshot(installed, receipt.published)) {
+      throw new Error("EXISTING_COMMAND_CONFLICT");
+    }
+    return installed;
+  };
+
+  const publishLauncher = (
+    receipt: LauncherMutationReceipt,
+    content: string,
+  ): Promise<LauncherSnapshot> =>
+    publishImmutableFile(
+      receipt,
+      content,
+      0o755,
+      MAX_LAUNCHER_BYTES,
+      options.testHooks?.beforeLauncherWrite,
+      options.testHooks?.afterLauncherPublish,
+    );
+
+  const publishProfile = (
+    receipt: ProfileMutationReceipt,
+    content: Buffer,
+    mode: number,
+  ): Promise<LauncherSnapshot> =>
+    publishImmutableFile(
+      receipt,
+      content,
+      mode,
+      MAX_PROFILE_BYTES,
+      options.testHooks?.beforeProfilePublish,
+      options.testHooks?.afterProfilePublish,
+    );
+
+  const removePublishedEntry = async (
+    receipt: LauncherMutationReceipt,
+    maxBytes: number,
+  ): Promise<MutationOutcome> => {
+    if (!receipt.published) return { ok: true, retainedPaths: [] };
+    // Avoid moving a replacement merely to inspect it. This keeps foreign
+    // files, symlinks, and especially directories at the user-visible path.
+    const current = await readSnapshotAtPath(receipt.file, maxBytes);
+    if (!current || current === "missing" || !sameSnapshot(current, receipt.published)) {
+      return {
+        ok: false,
+        retainedPaths: current === "missing" ? [] : [receipt.file],
+      };
+    }
+    const quarantinePath = hiddenRecoveryPath(receipt.file, "published");
+    let isolated = false;
+    try {
+      // Rollback uses the same rule in reverse. Never unlink the user-visible
+      // entry until the quarantined inode matches our publish receipt.
+      await fs.rename(receipt.file, quarantinePath);
+      isolated = true;
+      const moved = await readSnapshotAtPath(quarantinePath, maxBytes);
+      if (moved && moved !== "missing" && sameSnapshot(moved, receipt.published)) {
+        await fs.unlink(quarantinePath);
+        receipt.published = null;
+        return { ok: true, retainedPaths: [] };
+      }
+      const restored = await restoreEntryNoClobber(quarantinePath, receipt.file);
+      return {
+        ok: false,
+        retainedPaths: [restored ? receipt.file : quarantinePath],
+      };
+    } catch {
+      return {
+        ok: false,
+        retainedPaths: [isolated ? quarantinePath : receipt.file],
+      };
+    }
+  };
+
+  const rollbackImmutableFile = async (
+    receipt: LauncherMutationReceipt,
+    maxBytes: number,
+  ): Promise<MutationOutcome> => {
+    const publishedRemoval = await removePublishedEntry(receipt, maxBytes);
+    if (!receipt.quarantinePath) return publishedRemoval;
+    if (!receipt.previous) {
+      return {
+        ok: false,
+        retainedPaths: [...new Set([...publishedRemoval.retainedPaths, receipt.quarantinePath])],
+      };
+    }
+    const quarantined = await readSnapshotAtPath(
+      receipt.quarantinePath,
+      maxBytes,
+    );
     if (
-      initial.status === "unsupported" ||
-      initial.status === "conflict" ||
-      (initial.status === "error" && initial.retryable === false)
+      !quarantined ||
+      quarantined === "missing" ||
+      !sameSnapshot(quarantined, receipt.previous)
     ) {
+      return {
+        ok: false,
+        retainedPaths: [...new Set([...publishedRemoval.retainedPaths, receipt.quarantinePath])],
+      };
+    }
+    const restored = await restoreEntryNoClobber(receipt.quarantinePath, receipt.file);
+    if (restored) receipt.quarantinePath = null;
+    return {
+      ok: publishedRemoval.ok && restored,
+      retainedPaths: [
+        ...new Set([
+          ...publishedRemoval.retainedPaths,
+          ...(restored || !receipt.quarantinePath ? [] : [receipt.quarantinePath]),
+        ]),
+      ],
+    };
+  };
+
+  const rollbackLauncher = (receipt: LauncherMutationReceipt): Promise<MutationOutcome> =>
+    rollbackImmutableFile(receipt, MAX_LAUNCHER_BYTES);
+
+  const rollbackProfile = (receipt: ProfileMutationReceipt): Promise<MutationOutcome> =>
+    rollbackImmutableFile(receipt, MAX_PROFILE_BYTES);
+
+  const commitImmutableFile = async (
+    receipt: LauncherMutationReceipt,
+    maxBytes: number,
+  ): Promise<{ ok: boolean; recoveryPath?: string }> => {
+    if (!receipt.quarantinePath || !receipt.previous) return { ok: true };
+    const originalQuarantinePath = receipt.quarantinePath;
+    const cleanupPath = `${originalQuarantinePath}.commit-${crypto.randomUUID()}`;
+    try {
+      await fs.rename(originalQuarantinePath, cleanupPath);
+      receipt.quarantinePath = cleanupPath;
+      const moved = await readSnapshotAtPath(cleanupPath, maxBytes);
+      if (!moved || moved === "missing" || !sameSnapshot(moved, receipt.previous)) {
+        const restored = await restoreEntryNoClobber(cleanupPath, originalQuarantinePath);
+        if (restored) receipt.quarantinePath = originalQuarantinePath;
+        return {
+          ok: false,
+          recoveryPath: restored ? originalQuarantinePath : cleanupPath,
+        };
+      }
+      await options.testHooks?.beforeQuarantineCleanup?.(cleanupPath);
+      await fs.unlink(cleanupPath);
+      receipt.quarantinePath = null;
+      return { ok: true };
+    } catch {
+      return {
+        ok: false,
+        recoveryPath: receipt.quarantinePath ?? originalQuarantinePath,
+      };
+    }
+  };
+
+  const commitLauncher = (
+    receipt: LauncherMutationReceipt,
+  ): Promise<{ ok: boolean; recoveryPath?: string }> =>
+    commitImmutableFile(receipt, MAX_LAUNCHER_BYTES);
+
+  const commitProfile = (
+    receipt: ProfileMutationReceipt,
+  ): Promise<{ ok: boolean; recoveryPath?: string }> =>
+    commitImmutableFile(receipt, MAX_PROFILE_BYTES);
+
+  const immutableFileIsPublished = async (
+    receipt: LauncherMutationReceipt,
+    maxBytes: number,
+  ): Promise<boolean> => {
+    if (!receipt.published) return false;
+    const current = await readSnapshotAtPath(receipt.file, maxBytes);
+    return !!current && current !== "missing" && sameSnapshot(current, receipt.published);
+  };
+
+  const launcherIsPublished = (receipt: LauncherMutationReceipt): Promise<boolean> =>
+    immutableFileIsPublished(receipt, MAX_LAUNCHER_BYTES);
+
+  const profileIsPublished = (receipt: ProfileMutationReceipt): Promise<boolean> =>
+    immutableFileIsPublished(receipt, MAX_PROFILE_BYTES);
+
+  const performInstall = async (plan?: InstallPlan): Promise<DesktopCliInstallResult> => {
+    if (!plan || !validPlans.has(plan)) {
+      const state = plan?.state ?? (await getState());
+      return {
+        ok: false,
+        error: "安装前需要重新确认当前状态。",
+        state: {
+          ...state,
+          errorCode: "CONFIRMATION_REQUIRED",
+          message: "安装前需要重新确认当前状态。",
+          retryable: isConfirmableStatus(state.status),
+        },
+      };
+    }
+    validPlans.delete(plan);
+    const initial = plan.state;
+    if (!isConfirmableStatus(initial.status)) {
       return { ok: false, error: initial.message ?? "当前无法安装 CLI", state: initial };
     }
 
@@ -553,7 +1079,7 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
     let releaseLock: (() => Promise<void>) | null = null;
     try {
       await fs.mkdir(binDir, { recursive: true, mode: 0o755 });
-      releaseLock = await acquireInstallLock(lockPath);
+      releaseLock = await acquireInstallLock(lockPath, options.testHooks);
     } catch (error) {
       const busy = error instanceof Error && error.message === "INSTALL_BUSY";
       const state: DesktopCliInstallState = {
@@ -572,16 +1098,32 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
 
     try {
       const before = await getState();
-      if (
-        before.status === "unsupported" ||
-        before.status === "conflict" ||
-        (before.status === "error" && before.retryable === false)
-      ) {
-        return { ok: false, error: before.message ?? "当前无法安装 CLI", state: before };
+      const beforeFingerprint = await fingerprintState(before);
+      if (!isConfirmableStatus(before.status) || beforeFingerprint !== plan.fingerprint) {
+        const changed = isConfirmableStatus(before.status);
+        const state: DesktopCliInstallState = changed
+          ? {
+              ...before,
+              errorCode: "INSTALL_STATE_CHANGED",
+              message: "CLI 安装状态已变化，请检查后重新确认。",
+              retryable: true,
+            }
+          : before;
+        return { ok: false, error: state.message ?? "当前无法安装 CLI", state };
       }
 
       const bundledVersion = before.bundledVersion ?? (await readBundledVersion());
       const expectedContent = launcherContent(bundledVersion);
+      const managedPathPlan = await planManagedPath(profilePath, binDir, options.pathEnv);
+      if ((await fingerprintState(before)) !== plan.fingerprint) {
+        const state: DesktopCliInstallState = {
+          ...before,
+          errorCode: "INSTALL_STATE_CHANGED",
+          message: "CLI 安装状态已变化，请检查后重新确认。",
+          retryable: true,
+        };
+        return { ok: false, error: state.message ?? "CLI 安装状态已变化", state };
+      }
       installingState = {
         ...baseState("installing"),
         bundledVersion,
@@ -593,9 +1135,9 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
 
       let primaryBackup: LauncherBackup = null;
       let aliasBackup: LauncherBackup = null;
-      let primaryWritten = false;
-      let aliasWritten = false;
       let aliasWritable = true;
+      const launcherReceipts: LauncherMutationReceipt[] = [];
+      let profileMutation: ProfileMutationReceipt | undefined;
 
       try {
         // Back up both targets before the first write. If a foreign command
@@ -611,41 +1153,108 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
           }
         }
 
-        await writeLauncher(installPath, expectedContent, primaryBackup);
-        primaryWritten = true;
+        const primaryReceipt: LauncherMutationReceipt = {
+          file: installPath,
+          previous: primaryBackup,
+          quarantinePath: null,
+          published: null,
+        };
+        launcherReceipts.push(primaryReceipt);
+        await publishLauncher(primaryReceipt, expectedContent);
         if (aliasWritable) {
-          try {
-            await writeLauncher(aliasPath, expectedContent, aliasBackup);
-            aliasWritten = true;
-          } catch (error) {
-            if (!(error instanceof Error && error.message === "EXISTING_COMMAND_CONFLICT")) {
-              throw error;
-            }
-            // The legacy alias is optional. Preserve a command that appeared
-            // during installation and continue with the canonical name.
-          }
+          const aliasReceipt: LauncherMutationReceipt = {
+            file: aliasPath,
+            previous: aliasBackup,
+            quarantinePath: null,
+            published: null,
+          };
+          launcherReceipts.push(aliasReceipt);
+          await publishLauncher(aliasReceipt, expectedContent);
         }
 
-        const { stdout } = await runExecutable(installPath, ["version", "--json"], {
+        const { stdout } = await runExecutable(options.appExecutable, [
+          cliEntry,
+          "version",
+          "--json",
+        ], {
           cwd: options.homeDir,
           timeoutMs: VERIFY_TIMEOUT_MS,
+          env: {
+            ...process.env,
+            ELECTRON_RUN_AS_NODE: "1",
+            NODE_PATH: nodeModulesPath,
+            REMOTION_BINARIES_DIR: compositorPath,
+            REMOTION_BROWSER_EXECUTABLE: browserPath,
+          },
         });
         if (!parseVersionOutput(stdout, bundledVersion)) throw new Error("VERIFY_FAILED");
+        if (!(await Promise.all(launcherReceipts.map(launcherIsPublished))).every(Boolean)) {
+          throw new Error("EXISTING_COMMAND_CONFLICT");
+        }
 
-        const pathResult = await ensureManagedPath(profilePath, binDir, options.pathEnv);
+        if (managedPathPlan.needsPublish) {
+          if (!profilePath) throw new Error("VERIFY_FAILED");
+          profileMutation = {
+            file: profilePath,
+            previous: managedPathPlan.previous,
+            quarantinePath: null,
+            published: null,
+          };
+          await publishProfile(
+            profileMutation,
+            managedPathPlan.content,
+            managedPathPlan.mode,
+          );
+          if (!(await profileIsPublished(profileMutation))) {
+            throw new Error("EXISTING_COMMAND_CONFLICT");
+          }
+        }
+        await options.testHooks?.beforeFinalStateCheck?.();
         installingState = null;
         const installed = await getState();
-        const state = pathResult.warning ? { ...installed, message: pathResult.warning } : installed;
+        if (installed.status !== "installed") throw new Error("EXISTING_COMMAND_CONFLICT");
+        if (!(await Promise.all(launcherReceipts.map(launcherIsPublished))).every(Boolean)) {
+          throw new Error("EXISTING_COMMAND_CONFLICT");
+        }
+        if (profileMutation && !(await profileIsPublished(profileMutation))) {
+          throw new Error("EXISTING_COMMAND_CONFLICT");
+        }
+        const commitResults = await Promise.all([
+          ...launcherReceipts.map(commitLauncher),
+          ...(profileMutation ? [commitProfile(profileMutation)] : []),
+        ]);
+        const recoveryPaths = commitResults
+          .filter((result) => !result.ok && result.recoveryPath)
+          .map((result) => result.recoveryPath as string);
+        const messages = [managedPathPlan.warning ?? installed.message];
+        if (recoveryPaths.length > 0) {
+          messages.push(
+            `未能确认旧文件恢复副本的清理状态，请检查：${recoveryPaths.join("、")}。`,
+          );
+        }
+        const state = { ...installed, message: messages.filter(Boolean).join(" ") };
         return { ok: true, state };
       } catch (error) {
-        const rollbackResults = await Promise.all([
-          primaryWritten ? restore(installPath, primaryBackup, expectedContent) : true,
-          aliasWritten ? restore(aliasPath, aliasBackup, expectedContent) : true,
-        ]);
+        const rollbackResults: Array<{ file: string; outcome: MutationOutcome }> = [];
+        if (profileMutation) {
+          rollbackResults.push({
+            file: profileMutation.file,
+            outcome: await rollbackProfile(profileMutation),
+          });
+        }
+        for (const receipt of [...launcherReceipts].reverse()) {
+          rollbackResults.push({
+            file: receipt.file,
+            outcome: await rollbackLauncher(receipt),
+          });
+        }
         installingState = null;
-        const rollbackFailedPaths = [installPath, aliasPath].filter(
-          (_file, index) => !rollbackResults[index],
-        );
+        const rollbackFailedPaths = rollbackResults
+          .filter((result) => !result.outcome.ok)
+          .map((result) => result.file);
+        const retainedPaths = [
+          ...new Set(rollbackResults.flatMap((result) => result.outcome.retainedPaths)),
+        ];
         const rollbackFailed = rollbackFailedPaths.length > 0;
         const conflict = error instanceof Error && error.message === "EXISTING_COMMAND_CONFLICT";
         const state: DesktopCliInstallState = {
@@ -659,7 +1268,7 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
               ? "EXISTING_COMMAND_CONFLICT"
               : "VERIFY_FAILED",
           message: rollbackFailed
-            ? `CLI 自检失败，且无法安全恢复 ${rollbackFailedPaths.join("、")}。安装器没有覆盖后来出现的文件，请手动检查。`
+            ? `CLI 自检失败，且无法安全恢复 ${rollbackFailedPaths.join("、")}。安装器没有覆盖后来出现的文件，请手动检查${retainedPaths.length > 0 ? `：${retainedPaths.join("、")}` : ""}。`
             : conflict
               ? "检测到同名命令在安装期间发生变化，未进行覆盖。"
               : "CLI 自检失败，已撤销本次安装。请重试或更新桌面版。",
@@ -673,14 +1282,14 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
     }
   };
 
-  const install = (): Promise<DesktopCliInstallResult> => {
+  const install = (plan?: InstallPlan): Promise<DesktopCliInstallResult> => {
     if (installInFlight) return installInFlight;
-    installInFlight = performInstall().finally(() => {
+    installInFlight = performInstall(plan).finally(() => {
       installInFlight = null;
       installingState = null;
     });
     return installInFlight;
   };
 
-  return { getState, install };
+  return { getState, prepareInstall, install };
 }

@@ -188,3 +188,65 @@ test("source and destination symlinks are rejected without partial installation"
     );
   });
 });
+
+test("failed forced restore preserves the old skill backup and reports its recovery path", async () => {
+  await withTempDir(async (dir) => {
+    const source = path.join(dir, "source");
+    const project = path.join(dir, "project");
+    await createSkill(source, "v1");
+    await fs.mkdir(project);
+    await subject.installGenerateVideoSkill({
+      sourceDir: source,
+      cwd: project,
+      target: "codex",
+    });
+    await createSkill(source, "v2");
+
+    const target = path.join(project, ".agents", "skills", "generate-video");
+    const originalRename = fs.rename;
+    let activationFailed = false;
+    fs.rename = (async (from, to) => {
+      const sourcePath = String(from);
+      const destination = String(to);
+      if (sourcePath.endsWith(".partial") && destination === target) {
+        activationFailed = true;
+        throw new Error("simulated skill activation failure");
+      }
+      if (activationFailed && sourcePath.endsWith(".backup") && destination === target) {
+        throw new Error("simulated skill restore failure");
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename;
+
+    let failure: unknown;
+    try {
+      await subject.installGenerateVideoSkill({
+        sourceDir: source,
+        cwd: project,
+        target: "codex",
+        force: true,
+      });
+    } catch (error) {
+      failure = error;
+    } finally {
+      fs.rename = originalRename;
+    }
+
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, /自动恢复原 Skill 失败/);
+    assert.match(failure.message, /simulated skill activation failure/);
+    assert.match(failure.message, /simulated skill restore failure/);
+
+    const parent = path.dirname(target);
+    const artifacts = (await fs.readdir(parent)).filter(
+      (name) => name.includes(".partial") || name.includes(".backup"),
+    );
+    assert.equal(artifacts.length, 1);
+    assert.match(artifacts[0], /\.backup$/);
+    const backup = path.join(parent, artifacts[0]);
+    assert.match(await fs.readFile(path.join(backup, "SKILL.md"), "utf8"), /# v1/);
+    assert.match(failure.message, new RegExp(backup.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(failure.message, new RegExp(target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(await fs.lstat(target).catch(() => null), null);
+  });
+});

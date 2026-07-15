@@ -92,14 +92,13 @@ function initCliInstall(): void {
     resourcesPath: process.resourcesPath,
     cliRoot: path.join(process.resourcesPath, "cli"),
   });
-  let confirmationInFlight: Promise<boolean> | null = null;
+  let installRequestInFlight: Promise<Awaited<ReturnType<typeof installer.install>>> | null = null;
 
   const confirmInstall = (state: Awaited<ReturnType<typeof installer.getState>>): Promise<boolean> => {
-    if (confirmationInFlight) return confirmationInFlight;
     const window = mainWindow;
     if (!window) return Promise.resolve(false);
     const verb = state.status === "not-installed" ? "安装" : "修复";
-    confirmationInFlight = dialog
+    return dialog
       .showMessageBox(window, {
         type: "question",
         title: `${verb} Littlestart CLI`,
@@ -110,11 +109,7 @@ function initCliInstall(): void {
         cancelId: 1,
         noLink: true,
       })
-      .then((result) => result.response === 0)
-      .finally(() => {
-        confirmationInFlight = null;
-      });
-    return confirmationInFlight;
+      .then((result) => result.response === 0);
   };
 
   ipcMain.handle(DESKTOP_CLI_CHANNELS.getState, (event, ...args: unknown[]) => {
@@ -129,17 +124,25 @@ function initCliInstall(): void {
       throw new Error("拒绝来自非可信页面的 CLI 请求");
     }
 
-    const state = await installer.getState();
-    if (
-      state.status === "not-installed" ||
-      state.status === "repair-needed" ||
-      state.status === "installed"
-    ) {
+    if (installRequestInFlight) return installRequestInFlight;
+    installRequestInFlight = (async () => {
+      const plan = await installer.prepareInstall();
+      const state = plan.state;
+      if (
+        state.status !== "not-installed" &&
+        state.status !== "repair-needed" &&
+        state.status !== "installed"
+      ) {
+        return { ok: false as const, error: state.message ?? "当前无法安装 CLI", state };
+      }
       if (!(await confirmInstall(state))) {
         return { ok: false as const, canceled: true, error: "已取消安装", state };
       }
-    }
-    return installer.install();
+      return installer.install(plan);
+    })().finally(() => {
+      installRequestInFlight = null;
+    });
+    return installRequestInFlight;
   });
 }
 

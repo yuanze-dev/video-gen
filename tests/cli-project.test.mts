@@ -146,3 +146,48 @@ test("forced atomic replacement replaces a symlink, never its referent", async (
     assert.deepEqual(generatedArtifacts(await fs.readdir(dir)), []);
   });
 });
+
+test("failed atomic restore preserves the only backup and reports its recovery path", async () => {
+  await withTempDir(async (dir) => {
+    const target = path.join(dir, "output.txt");
+    await fs.writeFile(target, "original");
+
+    const originalRename = fs.rename;
+    let activationFailed = false;
+    fs.rename = (async (from, to) => {
+      const source = String(from);
+      const destination = String(to);
+      if (source.endsWith(".partial") && destination === target) {
+        activationFailed = true;
+        throw new Error("simulated activation failure");
+      }
+      if (activationFailed && source.endsWith(".backup") && destination === target) {
+        throw new Error("simulated restore failure");
+      }
+      return originalRename(from, to);
+    }) as typeof fs.rename;
+
+    let failure: unknown;
+    try {
+      await subject.writeFileAtomic(target, "replacement", true);
+    } catch (error) {
+      failure = error;
+    } finally {
+      fs.rename = originalRename;
+    }
+
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, /自动恢复原文件失败/);
+    assert.match(failure.message, /simulated activation failure/);
+    assert.match(failure.message, /simulated restore failure/);
+
+    const artifacts = generatedArtifacts(await fs.readdir(dir));
+    assert.equal(artifacts.length, 1);
+    assert.match(artifacts[0], /\.backup$/);
+    const backup = path.join(dir, artifacts[0]);
+    assert.equal(await fs.readFile(backup, "utf8"), "original");
+    assert.match(failure.message, new RegExp(backup.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(failure.message, new RegExp(target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.equal(await fs.lstat(target).catch(() => null), null);
+  });
+});

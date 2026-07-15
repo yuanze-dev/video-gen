@@ -62,6 +62,7 @@ async function installOne(source: string, target: string, force: boolean): Promi
   const stage = path.join(path.dirname(target), `.generate-video.${id}.partial`);
   const backup = path.join(path.dirname(target), `.generate-video.${id}.backup`);
   let movedOld = false;
+  let preserveBackup = false;
   try {
     const existing = await fs.lstat(target).catch(() => null);
     if (existing && !force) throw new Error(`Skill 已存在: ${target}（使用 --force 覆盖）`);
@@ -75,13 +76,29 @@ async function installOne(source: string, target: string, force: boolean): Promi
     try {
       await fs.rename(stage, target);
     } catch (error) {
-      if (movedOld) await fs.rename(backup, target).catch(() => {});
+      if (movedOld) {
+        try {
+          await fs.rename(backup, target);
+          movedOld = false;
+        } catch (restoreError) {
+          preserveBackup = true;
+          throw new Error(
+            `Skill 替换失败，且自动恢复原 Skill 失败。原 Skill 备份仍保留在 ${backup}；请手动将其移动回 ${target}。替换错误: ${error instanceof Error ? error.message : String(error)}；恢复错误: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+            { cause: error },
+          );
+        }
+      }
       throw error;
     }
-    if (movedOld) await fs.rm(backup, { recursive: true, force: true });
+    if (movedOld) {
+      await fs.rm(backup, { recursive: true, force: true });
+      movedOld = false;
+    }
   } finally {
     await fs.rm(stage, { recursive: true, force: true }).catch(() => {});
-    await fs.rm(backup, { recursive: true, force: true }).catch(() => {});
+    if (movedOld && !preserveBackup) {
+      await fs.rm(backup, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }
 

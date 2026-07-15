@@ -431,6 +431,7 @@ export async function writeFileAtomic(
     `.${path.basename(absolute)}.${process.pid}-${crypto.randomBytes(8).toString("hex")}.partial`,
   );
   let backup: string | undefined;
+  let preserveBackup = false;
   try {
     const handle = await fs.open(partial, "wx", 0o600);
     try {
@@ -450,14 +451,28 @@ export async function writeFileAtomic(
     try {
       await fs.rename(partial, absolute);
     } catch (error) {
-      if (backup) await fs.rename(backup, absolute).catch(() => {});
+      if (backup) {
+        try {
+          await fs.rename(backup, absolute);
+          backup = undefined;
+        } catch (restoreError) {
+          preserveBackup = true;
+          throw new Error(
+            `替换输出文件失败，且自动恢复原文件失败。原文件备份仍保留在 ${backup}；请手动将其移动回 ${absolute}。替换错误: ${error instanceof Error ? error.message : String(error)}；恢复错误: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+            { cause: error },
+          );
+        }
+      }
       throw error;
     }
-    if (backup) await fs.rm(backup, { force: true });
+    if (backup) {
+      await fs.rm(backup, { force: true });
+      backup = undefined;
+    }
     return absolute;
   } finally {
     await fs.rm(partial, { force: true }).catch(() => {});
-    if (backup) await fs.rm(backup, { force: true }).catch(() => {});
+    if (backup && !preserveBackup) await fs.rm(backup, { force: true }).catch(() => {});
   }
 }
 

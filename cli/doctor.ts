@@ -313,9 +313,20 @@ async function resolveSafeCacheRoot(
   return { root, exists: Boolean(stat) };
 }
 
-function isInside(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..");
+type PathContainmentApi = Pick<typeof path, "isAbsolute" | "relative" | "sep">;
+
+export function isInside(
+  root: string,
+  target: string,
+  pathApi: PathContainmentApi = path,
+): boolean {
+  const relative = pathApi.relative(root, target);
+  return (
+    relative === "" ||
+    (!relative.startsWith(`..${pathApi.sep}`) &&
+      relative !== ".." &&
+      !pathApi.isAbsolute(relative))
+  );
 }
 
 async function assertDirectoryInsideRoot(root: string, directory: string): Promise<void> {

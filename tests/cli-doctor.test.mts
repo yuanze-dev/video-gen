@@ -46,6 +46,17 @@ const fakeRenderer = {
   ensureBrowser: async () => ({ type: "no-browser" as const }),
 };
 
+test("path containment rejects Windows cross-volume targets on every host platform", () => {
+  assert.equal(
+    subject.isInside("C:\\Users\\tester\\cache", "C:\\Users\\tester\\cache\\browser", path.win32),
+    true,
+  );
+  assert.equal(
+    subject.isInside("C:\\Users\\tester\\cache", "D:\\other-cache\\browser", path.win32),
+    false,
+  );
+});
+
 test("read-only doctor leaves no cache probe or browser directory and never downloads", async () => {
   const parent = await temporaryDirectory("doctor-readonly");
   const cacheDir = path.join(parent, "nested", "cache");

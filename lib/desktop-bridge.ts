@@ -34,7 +34,9 @@ export type DesktopCliInstallState = {
     | "EXISTING_COMMAND_CONFLICT"
     | "VERIFY_FAILED"
     | "INSTALL_BUSY"
-    | "ROLLBACK_FAILED";
+    | "ROLLBACK_FAILED"
+    | "CONFIRMATION_REQUIRED"
+    | "INSTALL_STATE_CHANGED";
   message?: string;
   retryable?: boolean;
 };
