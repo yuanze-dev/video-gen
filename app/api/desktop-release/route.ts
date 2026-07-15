@@ -1,21 +1,19 @@
 const REQUIRED_RELEASE_TAG = "v0.2.1";
-const RELEASE_API = `https://api.github.com/repos/yuanze-dev/video-gen/releases/tags/${REQUIRED_RELEASE_TAG}`;
+const UPDATE_MANIFEST = `https://github.com/yuanze-dev/video-gen/releases/download/${REQUIRED_RELEASE_TAG}/latest-mac.yml`;
 
 export async function GET() {
   try {
     // Arm the Web-side forced-update gate only after the signed desktop release
     // is publicly available. This avoids blocking v0.2.0 during the short gap
     // between the production Web deploy and the macOS release workflow.
-    const release = await fetch(RELEASE_API, {
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": "video-gen-update-gate",
-      },
-      next: { revalidate: 30 },
+    const manifest = await fetch(UPDATE_MANIFEST, {
+      method: "HEAD",
+      redirect: "follow",
+      next: { revalidate: 15 },
     });
 
     return Response.json(
-      { required: release.ok, version: REQUIRED_RELEASE_TAG },
+      { required: manifest.ok, version: REQUIRED_RELEASE_TAG },
       { headers: { "Cache-Control": "private, no-store" } },
     );
   } catch {
