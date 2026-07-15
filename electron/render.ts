@@ -43,21 +43,15 @@ type Job = {
   outputPath?: string;
   coverPath?: string;
   cancel?: () => void;
-  active?: boolean; // true for the whole render (incl. browser launch), cleared in finally
 };
 
 const jobs = new Map<string, Job>();
 export const getJob = (id: string): Job | undefined => jobs.get(id);
 
-// True while any job is doing work — from the moment it enters the map through
-// asset write, browser launch, encode and cover, cleared in a finally on success
-// OR failure. The auto-updater checks this so a restart-to-update never kills an
-// in-progress export. (Keyed on an explicit flag, not `cancel`, which is only set
-// during the encode phase and would otherwise miss setup and leak on errors.)
-export const isRendering = (): boolean => {
-  for (const job of jobs.values()) if (job.active) return true;
-  return false;
-};
+// A session remains active through rendering AND the user's save/abandon step.
+// The mandatory updater must not restart while completed files are still only
+// reachable from the export dialog's temporary job directory.
+export const hasActiveExportSession = (): boolean => jobs.size > 0;
 
 // ---- localhost asset server (lazy, shared across renders) -------------------
 
@@ -124,11 +118,13 @@ export async function startRender(
 
   const id = crypto.randomUUID();
   const dir = path.join(os.tmpdir(), "teleprompter-render", id);
-  await fs.mkdir(dir, { recursive: true });
-  const job: Job = { id, dir, assets: {}, active: true };
+  const job: Job = { id, dir, assets: {} };
+  // Register before the first await so the updater cannot observe an idle gap
+  // while the job directory is being created.
   jobs.set(id, job);
 
   try {
+    await fs.mkdir(dir, { recursive: true });
     // Persist incoming assets to disk so the localhost server can stream them.
     // The id arrives over IPC from the page; reject anything that could escape
     // the job dir before using it as a path segment (defense-in-depth).
@@ -217,10 +213,12 @@ export async function startRender(
     job.cancel = undefined;
 
     return { jobId: id, outputPath, coverPath };
-  } finally {
-    // Mark the job idle whether it finished or threw, so a failed render never
-    // leaves the auto-updater thinking an export is still running.
-    job.active = false;
+  } catch (error) {
+    // Failed/cancelled jobs never reach the save step, so release the updater
+    // guard and remove partial artifacts before surfacing the error.
+    jobs.delete(id);
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
 }
 

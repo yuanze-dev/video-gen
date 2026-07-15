@@ -156,7 +156,7 @@ public/assets/builtin/      # 内置默认素材（麦克风 / 设备 / 背景 /
 macOS DMG（Apple Silicon）通过 electron-builder 产出，配置见 [`electron-builder.yml`](electron-builder.yml)：
 
 - UI 远程加载，桌面包体仅含 Electron 主/预载 bundle + `@remotion/renderer` 及其原生 compositor，`chrome-headless-shell` 随 `extraResources` 一并附带。
-- 桌面更新在后台下载；下载完成后会等待当前导出结束，再强制要求重启安装，不提供“稍后”入口。线上 UI 仅在对应签名版本已发布后，才会阻断能力过旧的客户端。
+- 桌面更新在后台下载；下载完成后会等待当前导出完成，并由用户保存或明确放弃产物，再强制要求重启安装，不提供“稍后”入口。线上 UI 仅在对应签名版本已发布后，才会阻断能力过旧的客户端。
 - 签名使用本地 *Developer ID Application* 证书（从钥匙串自动发现），开启 Hardened Runtime。
 - 公证由 `NOTARIZE` 环境变量控制（见 `build/notarize.cjs`）；缺省凭据时 `afterSign` 钩子为 no-op，仅做签名构建。
 

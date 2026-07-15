@@ -8,6 +8,7 @@ import { Progress } from "@/components/ui/progress";
 import { useEditor } from "@/lib/store";
 import type { ProjectConfig } from "@/lib/config-schema";
 import { DEFAULT_EXPORT_OPTIONS, type ExportOptions } from "@/lib/export-options";
+import { setExportSessionActive } from "@/lib/export-session";
 import { ExportOptionsForm } from "./ExportOptions";
 
 type Phase = "idle" | "working" | "done" | "error" | "unsupported" | "outdated";
@@ -85,6 +86,7 @@ export function ExportDialog() {
   const [stat, setStat] = useState("准备渲染任务…");
   const [jobId, setJobId] = useState<string | null>(null);
   const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [videoSaved, setVideoSaved] = useState(false);
   const unsubRef = useRef<(() => void) | null>(null);
   const jobRef = useRef<string | null>(null);
 
@@ -98,8 +100,18 @@ export function ExportDialog() {
     const id = jobRef.current;
     jobRef.current = null;
     if (id) void window.electronRender?.cleanup(id);
+    setExportSessionActive(false);
   };
-  useEffect(() => () => cleanup(), []);
+  useEffect(
+    () => () => {
+      cleanup();
+      const id = jobRef.current;
+      jobRef.current = null;
+      if (id) void window.electronRender?.cleanup(id);
+      setExportSessionActive(false);
+    },
+    [],
+  );
 
   const start = async (opts: ExportOptions) => {
     const bridge = window.electronRender;
@@ -116,9 +128,11 @@ export function ExportDialog() {
 
     cleanup();
     discardJob();
+    setExportSessionActive(true);
     setPhase("working");
     setProgress(0);
     setSavedPath(null);
+    setVideoSaved(false);
     setJobId(null);
     setStat("打包素材，提交本机渲染…");
 
@@ -135,6 +149,7 @@ export function ExportDialog() {
       const res = await bridge.render({ serveUrl, config, assets, options: opts });
       cleanup();
       if (!res.ok) {
+        setExportSessionActive(false);
         setStat(res.error || "渲染失败");
         setPhase("error");
         return;
@@ -146,6 +161,7 @@ export function ExportDialog() {
       setPhase("done");
     } catch (e) {
       cleanup();
+      setExportSessionActive(false);
       setStat(e instanceof Error ? e.message : "渲染失败");
       setPhase("error");
     }
@@ -155,7 +171,10 @@ export function ExportDialog() {
     const bridge = window.electronRender;
     if (!bridge || !jobId) return;
     const res = await bridge.save(jobId, kind);
-    if (res.ok) setSavedPath(res.path);
+    if (res.ok) {
+      setSavedPath(res.path);
+      if (kind === "video") setVideoSaved(true);
+    }
   };
 
   return (
@@ -183,11 +202,22 @@ export function ExportDialog() {
       <Dialog
         open={open}
         onOpenChange={(o) => {
+          if (!o && phase === "working") return;
+          if (
+            !o &&
+            phase === "done" &&
+            jobId &&
+            !videoSaved &&
+            !window.confirm("导出视频尚未保存，确定放弃这次导出吗？")
+          ) {
+            return;
+          }
           setOpen(o);
           if (!o) {
             cleanup();
             discardJob();
             setPhase("idle");
+            setJobId(null);
           }
         }}
       >
