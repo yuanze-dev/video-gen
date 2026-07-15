@@ -19,11 +19,14 @@ type ElectronRender = {
   isAvailable: boolean;
   supportsExportOptions?: boolean; // absent on shells older than the export-options release
   supportsEndingVideo?: boolean; // absent on shells older than the ending-video release
+  beginExportSession?: () => Promise<{ ok: true; sessionId: string }>;
+  endExportSession?: (sessionId: string) => Promise<{ ok: true }>;
   render: (p: {
     serveUrl: string;
     config: unknown;
     assets: RenderAsset[];
     options: ExportOptions;
+    sessionId?: string;
   }) => Promise<{ ok: true; jobId: string } | { ok: false; error: string }>;
   onProgress: (cb: (progress: number) => void) => () => void;
   save: (
@@ -89,6 +92,7 @@ export function ExportDialog() {
   const [videoSaved, setVideoSaved] = useState(false);
   const unsubRef = useRef<(() => void) | null>(null);
   const jobRef = useRef<string | null>(null);
+  const sessionRef = useRef<string | null>(null);
 
   const cleanup = () => {
     unsubRef.current?.();
@@ -96,19 +100,33 @@ export function ExportDialog() {
   };
   // Tell the desktop app to delete the finished job's temp dir (uploaded
   // assets + rendered files) so nothing lingers on disk between exports.
-  const discardJob = () => {
+  const discardJob = async () => {
     const id = jobRef.current;
+    const sessionId = sessionRef.current;
     jobRef.current = null;
-    if (id) void window.electronRender?.cleanup(id);
-    setExportSessionActive(false);
+    sessionRef.current = null;
+    try {
+      if (sessionId) await window.electronRender?.endExportSession?.(sessionId);
+      if (id) await window.electronRender?.cleanup(id);
+    } finally {
+      setExportSessionActive(false);
+    }
   };
   useEffect(
     () => () => {
       cleanup();
       const id = jobRef.current;
+      const sessionId = sessionRef.current;
       jobRef.current = null;
-      if (id) void window.electronRender?.cleanup(id);
-      setExportSessionActive(false);
+      sessionRef.current = null;
+      void (async () => {
+        try {
+          if (sessionId) await window.electronRender?.endExportSession?.(sessionId);
+          if (id) await window.electronRender?.cleanup(id);
+        } finally {
+          setExportSessionActive(false);
+        }
+      })();
     },
     [],
   );
@@ -127,7 +145,7 @@ export function ExportDialog() {
     }
 
     cleanup();
-    discardJob();
+    await discardJob();
     setExportSessionActive(true);
     setPhase("working");
     setProgress(0);
@@ -137,6 +155,10 @@ export function ExportDialog() {
     setStat("打包素材，提交本机渲染…");
 
     try {
+      if (bridge.beginExportSession) {
+        const reservation = await bridge.beginExportSession();
+        sessionRef.current = reservation.sessionId;
+      }
       const { config, assetUrls, fileNames } = editor;
       const assets = await collectAssets(config, assetUrls, fileNames);
       const serveUrl = `${window.location.origin}/remotion-site/`;
@@ -146,14 +168,24 @@ export function ExportDialog() {
         setStat("本机合成图层 · 编码 H.264…");
       });
 
-      const res = await bridge.render({ serveUrl, config, assets, options: opts });
+      const res = await bridge.render({
+        serveUrl,
+        config,
+        assets,
+        options: opts,
+        sessionId: sessionRef.current ?? undefined,
+      });
       cleanup();
       if (!res.ok) {
+        const sessionId = sessionRef.current;
+        sessionRef.current = null;
+        if (sessionId) await bridge.endExportSession?.(sessionId);
         setExportSessionActive(false);
         setStat(res.error || "渲染失败");
         setPhase("error");
         return;
       }
+      sessionRef.current = null;
       jobRef.current = res.jobId;
       setJobId(res.jobId);
       setProgress(100);
@@ -161,6 +193,9 @@ export function ExportDialog() {
       setPhase("done");
     } catch (e) {
       cleanup();
+      const sessionId = sessionRef.current;
+      sessionRef.current = null;
+      if (sessionId) await bridge.endExportSession?.(sessionId).catch(() => {});
       setExportSessionActive(false);
       setStat(e instanceof Error ? e.message : "渲染失败");
       setPhase("error");
@@ -215,7 +250,7 @@ export function ExportDialog() {
           setOpen(o);
           if (!o) {
             cleanup();
-            discardJob();
+            void discardJob();
             setPhase("idle");
             setJobId(null);
           }

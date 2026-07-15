@@ -8,7 +8,16 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { startRender, cancelRender, getJob, cleanupJob, type RenderRequest } from "./render";
+import {
+  startRender,
+  cancelRender,
+  getJob,
+  cleanupJob,
+  beginExportSession,
+  endExportSession,
+  cleanupExportSessionsForOwner,
+  type RenderRequest,
+} from "./render";
 import { initAutoUpdate } from "./updater";
 
 // In the packaged app, node_modules lives inside app.asar (read-only, can't
@@ -98,6 +107,13 @@ function createWindow() {
   // Remote content gets no implicit access to camera/mic/geolocation/etc.
   mainWindow.webContents.session.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
 
+  const renderer = mainWindow.webContents;
+  renderer.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) cleanupExportSessionsForOwner(renderer.id);
+  });
+  renderer.on("render-process-gone", () => cleanupExportSessionsForOwner(renderer.id));
+  renderer.on("destroyed", () => cleanupExportSessionsForOwner(renderer.id));
+
   void mainWindow.loadURL(APP_URL);
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -105,6 +121,16 @@ function createWindow() {
 }
 
 // ---- IPC: render bridge -----------------------------------------------------
+
+ipcMain.handle("render:session-begin", (event) => ({
+  ok: true as const,
+  sessionId: beginExportSession(event.sender.id),
+}));
+
+ipcMain.handle("render:session-end", (event, sessionId: string) => {
+  if (typeof sessionId === "string") endExportSession(sessionId, event.sender.id);
+  return { ok: true as const };
+});
 
 ipcMain.handle("render:start", async (event, payload: RenderRequest) => {
   try {
@@ -122,9 +148,13 @@ ipcMain.handle("render:start", async (event, payload: RenderRequest) => {
       throw new Error("serveUrl 不在可信来源内");
     }
     const sender = event.sender;
-    const result = await startRender(payload, (progress) => {
-      if (!sender.isDestroyed()) sender.send("render:progress", progress);
-    });
+    const result = await startRender(
+      payload,
+      (progress) => {
+        if (!sender.isDestroyed()) sender.send("render:progress", progress);
+      },
+      sender.id,
+    );
     return { ok: true as const, jobId: result.jobId };
   } catch (e) {
     return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
