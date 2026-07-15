@@ -25,6 +25,9 @@ const electronRender = {
   // option picker from an OLDER installed shell that would silently ignore it,
   // instead of offering controls that do nothing until the user auto-updates.
   supportsExportOptions: true as const,
+  // A remote editor can use this to avoid silently dropping a custom ending
+  // when paired with an older installed shell whose resolver predates it.
+  supportsEndingVideo: true as const,
 
   render: (payload: RenderPayload): Promise<{ ok: true; jobId: string } | { ok: false; error: string }> =>
     ipcRenderer.invoke("render:start", payload),

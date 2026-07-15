@@ -1,15 +1,24 @@
 "use client";
 
+/* eslint-disable react-hooks/refs -- refs in this file are only read from event handlers and effects */
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import type { PlayerRef } from "@remotion/player";
-import { Play, Pause, RefreshCw } from "lucide-react";
+import { Pause, Play, RefreshCw, RotateCcw } from "lucide-react";
+import { toast } from "sonner";
 import { TeleprompterVideo } from "@/remotion/TeleprompterVideo";
 import { resolveConfig } from "@/lib/resolved";
-import { totalFrames, openingFrames, contentFrames } from "@/lib/duration";
+import { totalFrames, openingFrames, contentFrames, endingFrames } from "@/lib/duration";
 import { micBox, deviceBox } from "@/lib/coords";
 import { CANVAS } from "@/lib/constants";
-import { useEditor, type DragTarget, type ContentTarget, type OpeningTarget } from "@/lib/store";
+import {
+  useEditor,
+  type DragTarget,
+  type ContentTarget,
+  type OpeningTarget,
+  type SceneView,
+} from "@/lib/store";
 
 const Player = dynamic(() => import("@remotion/player").then((m) => m.Player), {
   ssr: false,
@@ -49,6 +58,7 @@ export function Preview() {
   const config = useEditor((s) => s.config);
   const assetUrls = useEditor((s) => s.assetUrls);
   const view = useEditor((s) => s.view);
+  const viewFocusRevision = useEditor((s) => s.viewFocusRevision);
   const setView = useEditor((s) => s.setView);
   const selected = useEditor((s) => s.selected);
   const setSelected = useEditor((s) => s.setSelected);
@@ -56,6 +66,7 @@ export function Preview() {
   const setOpeningPos = useEditor((s) => s.setOpeningPos);
   const setScreen = useEditor((s) => s.setScreen);
   const addAsset = useEditor((s) => s.addAsset);
+  const resetAsset = useEditor((s) => s.resetAsset);
 
   const resolved = useMemo(() => resolveConfig(config, assetUrls), [config, assetUrls]);
   // Stable reference so 60fps scrubber re-renders don't hand the Player new
@@ -64,11 +75,16 @@ export function Preview() {
   const duration = useMemo(() => totalFrames(resolved), [resolved]);
   const openF = useMemo(() => openingFrames(resolved), [resolved]);
   const contentF = useMemo(() => contentFrames(resolved), [resolved]);
+  const endF = useMemo(() => endingFrames(resolved), [resolved]);
 
   const playerRef = useRef<PlayerRef | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
   const dragRef = useRef<DragState>(null);
+  const previousViewRef = useRef(view);
+  const previousViewFocusRef = useRef(viewFocusRevision);
+  const latestViewRef = useRef(view);
+  const latestViewFocusRef = useRef(viewFocusRevision);
 
   const [boxW, setBoxW] = useState(0);
   const [frame, setFrame] = useState(0);
@@ -78,12 +94,22 @@ export function Preview() {
 
   // representative frame for a scene (static editing peek)
   const frameForView = useCallback(
-    (v: "opening" | "content") =>
-      v === "opening"
-        ? Math.min(openF - 1, Math.round(openF * 0.45))
-        : Math.min(duration - 1, openF + Math.round(contentF * 0.35)),
-    [openF, contentF, duration],
+    (v: SceneView) => {
+      if (v === "opening") return Math.min(openF - 1, Math.round(openF * 0.45));
+      if (v === "content") {
+        return Math.min(duration - 1, openF + Math.round(contentF * 0.35));
+      }
+      return Math.min(duration - 1, openF + contentF + Math.round(endF * 0.45));
+    },
+    [openF, contentF, endF, duration],
   );
+  const frameForViewRef = useRef(frameForView);
+
+  useEffect(() => {
+    latestViewRef.current = view;
+    latestViewFocusRef.current = viewFocusRevision;
+    frameForViewRef.current = frameForView;
+  }, [frameForView, view, viewFocusRevision]);
 
   // measure preview box
   useEffect(() => {
@@ -94,6 +120,22 @@ export function Preview() {
     setBoxW(el.clientWidth);
     return () => ro.disconnect();
   }, []);
+
+  // The left editor is an accordion keyed by the same scene view. Switching a
+  // card — including reselecting the active card — moves the player to a
+  // representative frame as well.
+  useEffect(() => {
+    const sceneChanged = previousViewRef.current !== view;
+    const focusRequested = previousViewFocusRef.current !== viewFocusRevision;
+    if (!sceneChanged && !focusRequested) return;
+    const player = playerRef.current;
+    if (!player) return;
+    previousViewRef.current = view;
+    previousViewFocusRef.current = viewFocusRevision;
+    setSelected(null);
+    if (player.isPlaying()) player.pause();
+    player.seekTo(frameForView(view));
+  }, [frameForView, setSelected, view, viewFocusRevision]);
 
   // attach player listeners once the (dynamically imported) player mounts
   useEffect(() => {
@@ -112,8 +154,17 @@ export function Preview() {
       p.addEventListener("frameupdate", onFrame);
       p.addEventListener("play", onPlay);
       p.addEventListener("pause", onPause);
-      // Open on the very first frame — the closed curtain doubles as the cover.
-      p.seekTo(0);
+      const initialView = latestViewRef.current;
+      const focusWasRequested = latestViewFocusRef.current !== previousViewFocusRef.current;
+      // The first opening frame doubles as the cover. If the user already
+      // selected another card while the dynamic player was mounting, honor it.
+      p.seekTo(
+        initialView === "opening" && !focusWasRequested
+          ? 0
+          : frameForViewRef.current(initialView),
+      );
+      previousViewRef.current = initialView;
+      previousViewFocusRef.current = latestViewFocusRef.current;
     };
     attach();
     return () => {
@@ -124,10 +175,9 @@ export function Preview() {
         attached.removeEventListener("pause", onPause);
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const peek = (v: "opening" | "content") => {
+  const peek = (v: SceneView) => {
     setView(v);
     playerRef.current?.seekTo(frameForView(v));
   };
@@ -288,13 +338,21 @@ export function Preview() {
       ? config.opening.countdown.enabled
         ? ["title", "countdown"]
         : ["title"]
-      : ["device", "mic"];
+      : view === "content"
+        ? ["device", "mic"]
+        : [];
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4">
       {/* peek toggle */}
       <div className="flex gap-1 rounded-full border border-border bg-black/40 p-1 backdrop-blur">
-        {(["opening", "content"] as const).map((v, i) => (
+        {(
+          [
+            ["opening", "① 开场"],
+            ["content", "② 正片"],
+            ["ending", "③ 片尾"],
+          ] as const
+        ).map(([v, label]) => (
           <button
             key={v}
             onClick={() => peek(v)}
@@ -302,7 +360,7 @@ export function Preview() {
               view === v ? "bg-[#ff2d7e] font-semibold text-white" : "text-muted-foreground"
             }`}
           >
-            {i === 0 ? "① 开场" : "② 正片"}
+            {label}
           </button>
         ))}
       </div>
@@ -382,7 +440,7 @@ export function Preview() {
                   {on ? (
                     <>
                       <div
-                        className="absolute -top-8 left-0 flex gap-1"
+                        className={`absolute -top-8 flex gap-1 ${target === "mic" ? "right-0" : "left-0"}`}
                         onPointerDown={(e) => e.stopPropagation()}
                       >
                         <button
@@ -394,6 +452,21 @@ export function Preview() {
                         >
                           ↻ 替换
                         </button>
+                        {config.content[target].asset.kind === "upload" ? (
+                          <button
+                            title="恢复内置素材"
+                            onClick={() => {
+                              resetAsset(target);
+                              toast.success(
+                                `${target === "mic" ? "麦克风" : "手机"}已恢复为内置素材`,
+                              );
+                            }}
+                            className="flex items-center gap-1 whitespace-nowrap rounded-md bg-black/70 px-2 py-1 text-[10px] text-white"
+                          >
+                            <RotateCcw className="size-2.5" />
+                            内置
+                          </button>
+                        ) : null}
                         {target === "mic" ? (
                           <>
                             <button

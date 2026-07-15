@@ -9,6 +9,7 @@ const BUILTIN_FILES: Record<string, string> = {
   phone: "assets/builtin/teleprompter.png",
   "open-sfx": "assets/builtin/open-sfx.mp3",
   "airport-bgm": "assets/builtin/airport-bgm.mp3",
+  "flowprompter-outro": "assets/builtin/flowprompter-outro.mp4",
 };
 
 // Returns a usable src for an asset (image or audio), or null to fall back to a

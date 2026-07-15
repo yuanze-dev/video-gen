@@ -6,6 +6,7 @@ import {
   DEVICE_BASE_W,
   DEVICE_ASPECT,
 } from "./constants";
+import { DEFAULT_ENDING_DURATION_SEC } from "./config-schema";
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
@@ -48,12 +49,21 @@ export function contentSec(cfg: ResolvedConfig): number {
   return clamp(sec, MIN_CONTENT_SEC, MAX_CONTENT_SEC);
 }
 
-export function totalSec(cfg: ResolvedConfig): number {
-  return openingSec(cfg) + contentSec(cfg);
+export function endingSec(cfg: ResolvedConfig): number {
+  const duration = cfg.ending?.video?.asset?.durationSec;
+  return typeof duration === "number" && duration > 0
+    ? duration
+    : DEFAULT_ENDING_DURATION_SEC;
 }
 
 export function totalFrames(cfg: ResolvedConfig): number {
-  return Math.max(1, Math.round(totalSec(cfg) * cfg.canvas.fps));
+  return openingFrames(cfg) + contentFrames(cfg) + endingFrames(cfg);
+}
+
+export function totalSec(cfg: ResolvedConfig): number {
+  // Report the exact composition duration after each scene has been aligned to
+  // a frame boundary. This keeps CLI metadata and the rendered MP4 in sync.
+  return totalFrames(cfg) / cfg.canvas.fps;
 }
 
 export function openingFrames(cfg: ResolvedConfig): number {
@@ -62,4 +72,8 @@ export function openingFrames(cfg: ResolvedConfig): number {
 
 export function contentFrames(cfg: ResolvedConfig): number {
   return Math.max(1, Math.round(contentSec(cfg) * cfg.canvas.fps));
+}
+
+export function endingFrames(cfg: ResolvedConfig): number {
+  return Math.max(1, Math.round(endingSec(cfg) * cfg.canvas.fps));
 }

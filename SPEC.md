@@ -1,6 +1,6 @@
 # 提词秀 · 竖屏视频生成器 — 工程 Spec
 
-> 内部工具。把"机场提词器/开幕"这套竖屏短视频做成填空式模板：用户填几项内容、在预览里拖两个素材，点导出即得一条 1080×1920 MP4。
+> 内部工具。把"机场提词器/开幕 + FlowPrompter 片尾"这套竖屏短视频做成填空式模板：用户填几项内容、在预览里拖两个素材，点导出即得一条 1080×1920 MP4。
 
 ---
 
@@ -8,7 +8,7 @@
 
 **目标**
 - 一屏完成：左配置 + 右竖屏实时预览，所见即所得。
-- 两幕结构：① 开场（幕布 + 标题 + 倒计时 + 音效）→ ② 正片（背景 + 麦克风 + 提词设备 + 提词内容 + 背景音乐）。
+- 三段结构：① 开场 `opening`（幕布 + 标题 + 倒计时 + 音效）→ ② 正片 `content`（背景 + 麦克风 + 提词设备 + 提词内容 + 背景音乐）→ ③ 片尾 `ending`（默认 FlowPrompter 内置视频，可整体替换并保留原声）。
 - 提词内容两种模式：文字（提词器匀速上滚）/ 视频（在设备屏幕区内播放，保留原声）。
 - 麦克风、提词设备可在预览上直接拖拽 / 缩放。
 - 导出无水印 MP4，预览与成片像素级一致。
@@ -27,12 +27,12 @@
 |---|---|
 | 渲染形态 | 本地实时预览（Remotion Player）+ 云端高清导出（同一套合成组件） |
 | 编辑形态 | 固定模板 + 局部可拖拽（仅麦克风 / 提词设备） |
-| 视频时长 | 由内容自动决定（见 §6 时长公式），用户用"滚动速度"间接调 |
+| 视频时长 | 开场、正片、片尾分别自动决定并逐段对齐到帧后相加（见 §6）；正文可用"滚动速度"间接调，替换视频自动探测时长 |
 | 提词视频模式 | 在提词设备的"屏幕区"内播放，保留原声 |
 | 幕布 | 前端代码生成（SVG/CSS 渐变 + frame 驱动），**非**素材视频（见 §7） |
 | 幕布素材形态 | 不再需要用户上传透明视频；改为内置可调的代码幕布 |
 | 提词文字区 | 独立于设备素材的矩形蒙版，与设备解耦 |
-| 默认素材 | 内置一套（麦克风 / 手+手机 / 机场背景 / 开屏音效），用户可逐个替换 |
+| 默认素材 | 内置一套（麦克风 / 手+手机 / 机场背景 / 开屏音效 / FlowPrompter 片尾），用户可逐个替换 |
 
 > 注：早期"幕布=透明视频上传"的方案已废弃，改为代码生成（见 §7 调研结论）。
 
@@ -55,7 +55,7 @@
 ┌──────────────────────── Browser (Next.js) ────────────────────────┐
 │  Editor 壳                                                          │
 │  ┌── 左：配置表单（shadcn） ──┐   ┌── 右：预览 ──────────────────┐ │
-│  │  开场 / 正片 字段           │   │  <Player/>  ← 同一套合成组件  │ │
+│  │  开场 / 正片 / 片尾字段     │   │  <Player/>  ← 同一套合成组件  │ │
 │  │  写入 ProjectConfig         │──▶│  叠加：拖拽/缩放交互层        │ │
 │  └────────────────────────────┘   └──────────────────────────────┘ │
 │        │ ProjectConfig (单一数据源)            ▲ 读 transform 回写    │
@@ -102,7 +102,7 @@ const AssetRef = z.object({
 
 export const ProjectConfig = z.object({
   version: z.literal(1),
-  canvas: z.object({ width: z.literal(1080), height: z.literal(1920), fps: z.literal(30) }),
+  canvas: z.object({ width: z.literal(1080), height: z.literal(1920), fps: z.literal(60) }),
 
   opening: z.object({
     title: z.object({
@@ -140,6 +140,23 @@ export const ProjectConfig = z.object({
     }),
     bgm: z.object({ asset: AssetRef, volume: z.number().min(0).max(1).default(0.55) }).nullable(),
   }),
+
+  ending: z.object({
+    video: z.object({
+      asset: AssetRef,
+      keepAudio: z.boolean().default(true),
+    }),
+  }).default({
+    video: {
+      asset: {
+        kind: "builtin",
+        id: "flowprompter-outro",
+        mime: "video/mp4",
+        durationSec: 2.227664,
+      },
+      keepAudio: true,
+    },
+  }),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfig>;
@@ -151,33 +168,36 @@ export type ProjectConfig = z.infer<typeof ProjectConfig>;
 
 ### 时间轴
 ```
-0 ─── 开场 ─── openingEnd ─────────── 正片 ─────────── total
-      倒计时 from→0     幕布拉开            提词滚动 / 视频播放
+0 ─── 开场 ─── openingEnd ───────── 正片 ─────── contentEnd ─── 片尾 ─── total
+      倒计时 / 幕布拉开             提词滚动 / 视频播放       固定视频 / 原声
 ```
 
 ### 时长公式（编辑器与合成组件共用 `/lib/duration.ts`）
-- `countdownSec = countdown.enabled ? countdown.from : 0`
-- `openingEnd = countdownSec + curtain.openDurationSec`（幕布在倒计时结束后拉开）
+- `openingSec = countdown.enabled ? countdown.from / countdown.speed : curtain.openDurationSec`（倒计时与幕布动画在同一开场区间内完成）。
 - 正片时长 `contentSec`：
   - **文字模式**：`contentSec = max(MIN_CONTENT, scrollPx / (BASE_PX_PER_SEC * speed))`，`scrollPx = 文本渲染高度 − 屏幕区高度`（文本不足以滚动则取 `MIN_CONTENT`，如 6s）。
   - **视频模式**：`contentSec = video.durationSec`。
-- `totalSec = openingEnd + contentSec`，`durationInFrames = round(totalSec * fps)`。
-- **背景音乐**：循环或裁剪铺满 `totalSec`，不参与时长决定。
+- 片尾时长 `endingSec = ending.video.asset.durationSec`；默认内置片尾为 `2.227664s`，替换视频由浏览器或 CLI 自动探测元数据。
+- `openingFrames = round(openingSec * fps)`；`contentFrames = max(1, round(contentSec * fps))`；`endingFrames = max(1, round(endingSec * fps))`。
+- `totalFrames = openingFrames + contentFrames + endingFrames`，`totalSec = totalFrames / fps`。按段落分别对齐帧，避免 CLI 预估与实际 MP4 因累计取整产生偏差。
+- **背景音乐**：只在正片 `content` 区间循环，不参与时长决定，也不会进入片尾；片尾是否播放自身原声由 `ending.video.keepAudio` 决定，默认 `true`。
 
 Remotion 用 `calculateMetadata()` 由 `ProjectConfig` 算出 `durationInFrames`，预览与渲染一致。
 
 ### 合成结构
 ```
 <TeleprompterVideo config>           // 根合成
-  <Sequence 0..openingEnd>  <Opening/>   </Sequence>
-  <Sequence openingEnd..>   <Content/>   </Sequence>
-  <Audio bgm loop volume/>             // 贯穿正片
+  <Sequence 0..openingEnd>          <Opening/>  </Sequence>
+  <Sequence openingEnd..contentEnd> <Content/>  </Sequence>
+  <Sequence contentEnd..total>      <Ending/>   </Sequence>
+  <Sequence openingEnd..contentEnd> <Audio bgm loop volume/> </Sequence>
 </TeleprompterVideo>
 ```
 - `<Opening/>`：背景静帧 + `<Title/>` + `<Countdown/>` + `<Curtain/>`（最上层）+ 开场音效 `<Audio/>`。
 - `<Content/>`：`<Background/>` + `<Teleprompter/>`（屏幕区，文字滚动或 `<OffthreadVideo/>`）+ `<Device/>`（设备素材，纯装饰）+ `<Mic/>`。
   - 图层顺序（下→上）：背景 → 提词屏幕内容 → 设备素材（盖住屏幕区边框）→ 麦克风。
   - 注意：提词屏幕区在设备素材**之下**还是**之上**取决于素材是否透明屏幕。默认设备素材的屏幕处透明 → 屏幕内容在其下方透出。
+- `<Ending/>`：全屏 `<OffthreadVideo/>`，`object-fit: cover`；默认使用 `flowprompter-outro`，替换时只更换整段视频，不开放裁剪、变速或自由布局。
 
 ---
 
@@ -214,6 +234,8 @@ Remotion 用 `calculateMetadata()` 由 `ProjectConfig` 算出 `durationInFrames`
 │    背景图 [上传]                     │                              │
 │    提词内容 [文字|视频] tab          │                              │
 │    背景音乐 [上传] + 音量            │                              │
+│  ③ 片尾                              │   [③ 片尾] peek 切换           │
+│    FlowPrompter 片尾（内置）[替换]   │                              │
 └──────────────────────────────────────┴──────────────────────────────┘
 ```
 
@@ -223,7 +245,7 @@ Remotion 用 `calculateMetadata()` 由 `ProjectConfig` 算出 `durationInFrames`
 | 顶栏按钮 | `Button` |
 | 标题 / 文本输入 | `Input`、`Textarea`、`Label` |
 | 倒计时 / 保留原声开关 | `Switch` |
-| 提词模式、开场/正片切换 | `Tabs` 或 `ToggleGroup` |
+| 提词模式、开场/正片/片尾切换 | `Tabs` 或 `ToggleGroup` |
 | 滚动速度 / 音量 | `Slider` |
 | 上传区 | 自定义 dropzone（`Button` + 隐藏 input + `Card`） |
 | 配置分组 | `Card` |
@@ -233,6 +255,7 @@ Remotion 用 `calculateMetadata()` 由 `ProjectConfig` 算出 `durationInFrames`
 ### 配置项（删无可删后的最终集）
 **① 开场**：标题文字；倒计时开关。（幕布、音效内置；幕布颜色作为"进阶"可选项，默认折叠不展示。）
 **② 正片**：背景图上传；提词内容（文字 tab：文本 + 滚动速度；视频 tab：上传 + 保留原声开关）；背景音乐上传 + 音量。
+**③ 片尾**：默认显示“FlowPrompter 片尾（内置）”；提供“点击上传视频替换”，上传后自动读取时长并切到片尾预览。片尾始终存在，默认保留原声，不提供关闭或自由编辑能力。
 **预览上直接操作**：拖动麦克风 / 提词设备改位置，拖角缩放，选中显示"↻ 替换素材"。
 
 ---
@@ -244,7 +267,7 @@ Remotion 用 `calculateMetadata()` 由 `ProjectConfig` 算出 `durationInFrames`
   - 选中麦克风/提词设备 → 画选择框 + 右下角缩放手柄 + 替换入口。
   - 指针拖动 → 换算成归一化 `transform`（除以预览像素尺寸）→ 回写 `ProjectConfig`。
   - 因为坐标归一化，导出时按 1080×1920 还原，完全一致。
-- "开场/正片" peek 切换 = 把 `<Player>` 跳到对应幕的代表帧做静态查看；▶ 播放整段。
+- "开场/正片/片尾" peek 切换 = 把 `<Player>` 跳到对应段落的代表帧做静态查看；▶ 播放完整三段。
 
 ---
 
@@ -256,7 +279,14 @@ Remotion 用 `calculateMetadata()` 由 `ProjectConfig` 算出 `durationInFrames`
   2. `bundle()` 合成入口 → `renderMedia({ codec: "h264", ... })`。
   3. `onProgress` 写 job 状态。
 - **异步 job**：`POST /api/render` 返回 `jobId`；`GET /api/render/:jobId` 返回 `{ status, progress, url }`，前端轮询并显示进度弹窗，完成后下载。
-- 输出：MP4 / H.264 + AAC，1080×1920，30fps，无水印。
+- 输出：MP4 / H.264 + AAC，默认 1080×1920、60fps（可选 720p、30fps），无水印。
+
+### 本地 CLI
+
+- `validate <配置.json>`：深合并默认配置、校验素材类型，并为 `content.teleprompter.video.asset` 和 `ending.video.asset` 的本地文件自动探测时长；stdout 返回 `ok/durationSec/openingSec/contentSec/endingSec/localFiles/canvas`。
+- `assets`：stdout 返回 `ok/builtin`，每个内置素材包含 `id/type/usage/desc`；`flowprompter-outro` 的 `usage` 为 `ending.video.asset`。
+- `render`：stdout 返回 `ok/output/cover/durationSec/sizeBytes/quality/resolution/fps`；`durationSec` 使用 §6 的三段总时长。
+- CLI 的部分 JSON 可用 `{ "kind": "file", "path": "./my-outro.mp4" }` 替换 `ending.video.asset`。路径相对配置文件所在目录；自动探测失败时可显式填写 `durationSec`。
 - 并发：内部工具量小，单机串行 + 简单内存队列即可；需要时再加队列中间件。
 
 ---
@@ -268,6 +298,7 @@ Remotion 用 `calculateMetadata()` 由 `ProjectConfig` 算出 `durationInFrames`
 | 背景图 | `URL.createObjectURL(File)` | 随任务上传 | jpg/png/webp，建议 ≥1080×1920 |
 | 麦克风 / 设备 | 同上 | 同上 | png（建议带透明通道） |
 | 提词视频 | `<OffthreadVideo>` 用 blob URL | 上传文件 | mp4/mov/webm，读取 `durationSec` 决定时长 |
+| 片尾视频 | `<OffthreadVideo>` 用内置 URL 或 blob URL | 内置文件或随任务上传 | 默认 `flowprompter-outro`；替换支持 mp4/mov/webm，读取 `durationSec` 决定片尾时长 |
 | 背景音乐 | `<Audio>` blob URL | 上传文件 | mp3/m4a/wav |
 | 内置默认素材 | 打包在 `/public` | 同源读取 | 见 §13 待补 |
 
@@ -331,4 +362,3 @@ Remotion 用 `calculateMetadata()` 由 `ProjectConfig` 算出 `durationInFrames`
 5. **字体**：标题/提词默认字体（Inter / 思源黑体？）需确定并自托管，确保渲染端可用。
 6. **提词文字模式无人声**：正片若只有背景音乐、无旁白，是否需要"文字转语音/配音"？当前不做，按纯滚动文字。
 ```
-

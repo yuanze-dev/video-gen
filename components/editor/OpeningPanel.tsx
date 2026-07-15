@@ -5,6 +5,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useEditor } from "@/lib/store";
+import { StagePanel } from "./StagePanel";
 
 const num = (v: number | readonly number[]) => (Array.isArray(v) ? v[0] : (v as number));
 
@@ -41,14 +42,12 @@ export function OpeningPanel() {
   const isPreset = CURTAIN_COLORS.some((c) => c.value.toLowerCase() === curtainColor.toLowerCase());
 
   return (
-    <section className="rounded-2xl border border-border bg-card p-5">
-      <header className="mb-4 flex items-center gap-2.5">
-        <span className="grid size-5 place-items-center rounded-full bg-[#ff2d7e] text-[11px] font-bold text-white">
-          1
-        </span>
-        <h2 className="text-sm font-semibold">开场</h2>
-      </header>
-
+    <StagePanel
+      stage="opening"
+      step={1}
+      title="开场"
+      description="标题、倒计时与幕布样式"
+    >
       <div className="space-y-4">
         <div className="space-y-2">
           <Label htmlFor="title" className="text-xs">标题文字</Label>
@@ -157,6 +156,6 @@ export function OpeningPanel() {
           </div>
         </div>
       </div>
-    </section>
+    </StagePanel>
   );
 }

@@ -1,6 +1,6 @@
 # 小音符起号助手 · 竖屏提词短视频生成器
 
-> 填空式模板，把「开幕 + 提词器」这套竖屏短视频做成所见即所得的一屏编辑器：填几项内容、在预览里拖两个素材，一键导出 1080×1920 无水印 MP4。
+> 填空式模板，把「开幕 + 提词器 + FlowPrompter 片尾」这套竖屏短视频做成所见即所得的一屏编辑器：填几项内容、在预览里拖两个素材，一键导出 1080×1920 无水印 MP4。
 
 <p>
   <img alt="Next.js" src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" />
@@ -17,8 +17,9 @@
 ## ✨ 功能特性
 
 - **一屏编辑**：左侧配置表单 + 右侧 9:16 实时预览，所见即所得。
-- **两幕结构**：① 开场（丝绒幕布 + 标题 + 3·2·1 倒计时 + 开场音效）→ ② 正片（背景 + 麦克风 + 提词设备 + 提词内容 + 背景音乐）。
+- **三段结构**：① 开场 `opening`（丝绒幕布 + 标题 + 3·2·1 倒计时 + 开场音效）→ ② 正片 `content`（背景 + 麦克风 + 提词设备 + 提词内容 + 背景音乐）→ ③ 片尾 `ending`（FlowPrompter 内置视频 + 原声）。
 - **提词两种模式**：文字（提词器匀速上滚，可调速度）/ 视频（在设备屏幕区内播放，保留原声）。
+- **固定片尾可替换**：新建及旧版配置默认带 FlowPrompter 片尾；可上传另一段视频整体替换，系统自动读取片尾时长并计入成片。
 - **直接操作**：麦克风、提词设备可在预览上直接拖拽 / 缩放，坐标归一化回写，导出 1:1 还原。
 - **代码生成的幕布**：纯 SVG/CSS 渐变 + `transform` 模拟丝绒对开，颜色可调，确定性渲染、可任意 seek。
 - **首帧封面导出**：导出视频的同时输出第一帧（合幕状态）作为封面图。
@@ -76,7 +77,31 @@ npm install
 npm run dev
 ```
 
-打开 http://localhost:3000 即可使用编辑器。
+打开 http://localhost:3000 即可使用编辑器。左侧依次是开场、正片和片尾三张配置卡片；右侧可用 `① 开场 / ② 正片 / ③ 片尾` 快速跳到对应段落预览，播放时仍会完整播放三段。
+
+### 本地 CLI
+
+无需打开编辑器也可以用部分 JSON 配置直接校验和渲染：
+
+```bash
+node scripts/cli.mjs validate 配置.json
+node scripts/cli.mjs render 配置.json --out output/视频.mp4
+node scripts/cli.mjs assets
+```
+
+配置会深合并到默认模板。`validate` 的 stdout JSON 包含 `durationSec`、`openingSec`、`contentSec`、`endingSec`、`localFiles` 和 `canvas`；`assets` 返回内置素材的 `id/type/usage/desc`，其中默认片尾为 `flowprompter-outro`，使用位置是 `ending.video.asset`。自定义片尾可写成：
+
+```json
+{
+  "ending": {
+    "video": {
+      "asset": { "kind": "file", "path": "./my-outro.mp4" }
+    }
+  }
+}
+```
+
+CLI 会自动探测本地视频时长；也可在 `asset` 上显式提供 `durationSec`。总时长按 `opening + content + ending` 三段逐段对齐到帧后相加。
 
 ---
 
@@ -88,6 +113,7 @@ npm run dev
 | `npm run build` | 构建 Remotion 静态站点 + Next.js 生产产物 |
 | `npm run start` | 以生产模式启动 |
 | `npm run lint` | ESLint 检查 |
+| `npm run cli -- <命令>` | 运行无界面的本地校验 / 渲染 CLI |
 | `npm run build:remotion-site` | 仅把 `/remotion` 打包到 `public/remotion-site`（供托管站点 `serveUrl` 使用）|
 | `npm run electron:dev` | 编译并以源码运行桌面壳（加载 localhost UI）|
 | `npm run electron:build` | 构建并用 electron-builder 打包 macOS DMG |
@@ -108,7 +134,7 @@ components/
 remotion/
   Root.tsx                  # registerRoot + <Composition calculateMetadata>
   TeleprompterVideo.tsx     # 根合成
-  scenes/ · elements/       # Opening/Content、Curtain、Title、Countdown…
+  scenes/ · elements/       # Opening/Content/Ending、Curtain、Title、Countdown…
 lib/
   config-schema.ts          # Zod ProjectConfig（单一数据源）
   duration.ts               # 时长公式（编辑器与合成共用）
@@ -120,7 +146,7 @@ electron/
   preload.ts                # IPC 桥
   render.ts                 # 本机 @remotion/renderer 驱动
 scripts/                    # build-remotion-site / build-electron
-public/assets/builtin/      # 内置默认素材（麦克风 / 设备 / 背景 / 音效）
+public/assets/builtin/      # 内置默认素材（麦克风 / 设备 / 背景 / 音效 / FlowPrompter 片尾）
 ```
 
 ---

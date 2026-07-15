@@ -20,6 +20,8 @@
 # generated build artifacts
 /public/remotion-site/
 /electron/dist/
+/cli/dist/
+/output/
 /.remotion-build/
 
 # electron-builder output
