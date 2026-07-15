@@ -1,6 +1,6 @@
 {
   "name": "video-gen",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "小音符起号助手 — 提词器视频生成器（本机渲染桌面版）",
   "author": "原则科技 Yuanze",
@@ -12,6 +12,8 @@
     "build": "npm run build:remotion-site && next build",
     "start": "next start",
     "lint": "eslint",
+    "test:update": "node --no-warnings --experimental-strip-types --test tests/desktop-update.test.mts",
+    "typecheck:electron": "tsc -p tsconfig.electron.json",
     "build:electron": "node scripts/build-electron.mjs",
     "electron:dev": "npm run build:electron && electron .",
     "electron:build": "npm run build:remotion-site && npm run build:electron && electron-builder --mac"

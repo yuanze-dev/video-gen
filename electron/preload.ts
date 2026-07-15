@@ -3,6 +3,11 @@
 // MP4 export through it; in a plain browser the object is absent.
 import { contextBridge, ipcRenderer } from "electron";
 import type { ExportOptions } from "../lib/export-options";
+import {
+  DESKTOP_UPDATE_CHANNELS,
+  type DesktopRenderBridge,
+  type DesktopUpdateState,
+} from "../lib/desktop-bridge";
 
 export type BridgeAsset = {
   id: string;
@@ -29,6 +34,9 @@ const electronRender = {
   // A remote editor can use this to avoid silently dropping a custom ending
   // when paired with an older installed shell whose resolver predates it.
   supportsEndingVideo: true as const,
+  // Status snapshots + events let the remote editor show truthful download
+  // progress and recovery actions instead of an unbounded generic spinner.
+  supportsUpdateStatus: true as const,
 
   beginExportSession: (): Promise<{ ok: true; sessionId: string }> =>
     ipcRenderer.invoke("render:session-begin"),
@@ -56,7 +64,20 @@ const electronRender = {
   reveal: (filePath: string): Promise<{ ok: true }> => ipcRenderer.invoke("render:reveal", filePath),
 
   cleanup: (jobId: string): Promise<{ ok: true }> => ipcRenderer.invoke("render:cleanup", jobId),
-};
+
+  getUpdateState: (): Promise<DesktopUpdateState> =>
+    ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.getState),
+
+  retryUpdate: () => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.retry),
+
+  restartAndInstall: () => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.install),
+
+  onUpdateState: (callback: (state: DesktopUpdateState) => void): (() => void) => {
+    const handler = (_event: unknown, state: DesktopUpdateState) => callback(state);
+    ipcRenderer.on(DESKTOP_UPDATE_CHANNELS.stateChanged, handler);
+    return () => ipcRenderer.off(DESKTOP_UPDATE_CHANNELS.stateChanged, handler);
+  },
+} satisfies DesktopRenderBridge;
 
 contextBridge.exposeInMainWorld("electronRender", electronRender);
 

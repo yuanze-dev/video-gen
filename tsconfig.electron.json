@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "electron/**/*.ts",
+    "lib/config-schema.ts",
+    "lib/default-assets.ts",
+    "lib/desktop-bridge.ts",
+    "lib/export-options.ts"
+  ],
+  "exclude": ["node_modules", "electron/dist"]
+}
