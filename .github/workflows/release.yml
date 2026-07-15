@@ -65,6 +65,33 @@ jobs:
             exit 1
           fi
 
+      # electron-builder publishes the DMG and ZIP from separate async
+      # publishers. If neither sees an existing draft they can race and create
+      # two releases for the same tag, splitting the assets between them.
+      - name: Prepare a single draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RAW="$(node -p "require('./package.json').version")"
+          VERSION="v$RAW"
+          MATCHES="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq "[.[] | select(.tag_name == \"$VERSION\")]")"
+          COUNT="$(jq length <<<"$MATCHES")"
+
+          if [ "$COUNT" = "0" ]; then
+            gh release create "$VERSION" --draft --verify-tag --title "$RAW" \
+              --notes "Background update release $VERSION."
+          elif [ "$COUNT" = "1" ]; then
+            IS_DRAFT="$(jq -r '.[0].draft' <<<"$MATCHES")"
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::Release $VERSION is already public; refusing to overwrite it"
+              exit 1
+            fi
+          else
+            echo "::error::Found $COUNT releases for $VERSION; expected exactly one draft"
+            exit 1
+          fi
+
       - name: Ensure headless Chromium (chrome-headless-shell)
         run: node scripts/ensure-chrome.mjs
 
@@ -107,15 +134,20 @@ jobs:
           ZIP="littlestart-$RAW-arm64-mac.zip"
           BLOCKMAP="$ZIP.blockmap"
           DMG="littlestart-$RAW-arm64.dmg"
-          IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"
-          if [ "$IS_DRAFT" != "true" ] && [ "$IS_DRAFT" != "false" ]; then
-            echo "::error::Unexpected isDraft value for $VERSION: $IS_DRAFT"
+          MATCHES="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq "[.[] | select(.tag_name == \"$VERSION\")]")"
+          COUNT="$(jq length <<<"$MATCHES")"
+          if [ "$COUNT" != "1" ]; then
+            echo "::error::Found $COUNT releases for $VERSION; expected exactly one"
             exit 1
           fi
+          RELEASE_ID="$(jq -r '.[0].id' <<<"$MATCHES")"
+          IS_DRAFT="$(jq -r '.[0].draft' <<<"$MATCHES")"
 
           gh release delete-asset "$VERSION" "video-gen-$RAW-arm64-mac.zip" --yes || true
 
-          ASSETS="$(gh release view "$VERSION" --json assets --jq '.assets[].name')"
+          ASSETS="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            --jq '.assets[].name')"
           for asset in latest-mac.yml "$ZIP" "$BLOCKMAP" "$DMG"; do
             if ! grep -Fxq "$asset" <<<"$ASSETS"; then
               echo "::error::Release $VERSION is missing required asset: $asset"
@@ -140,7 +172,10 @@ jobs:
           NODE
 
           if [ "$IS_DRAFT" = "true" ]; then
-            gh release edit "$VERSION" --draft=false
-          else
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" -F draft=false >/dev/null
+          elif [ "$IS_DRAFT" = "false" ]; then
             echo "$VERSION is already public; verified all required assets."
+          else
+            echo "::error::Unexpected draft value for $VERSION: $IS_DRAFT"
+            exit 1
           fi
