@@ -19,5 +19,6 @@ export const MAX_CONTENT_SEC = 600;
 
 export const ACCENT = "#ff2d7e";
 
-// Font stack — generic, available in headless Chromium and on most systems.
-export const FONT_STACK = 'Arial, "Helvetica Neue", Helvetica, system-ui, sans-serif';
+// The Remotion entrypoint bundles this OFL font, keeping CLI renders identical
+// across macOS, Windows, Linux and headless containers.
+export const FONT_STACK = '"Noto Sans SC Variable", Arial, sans-serif';

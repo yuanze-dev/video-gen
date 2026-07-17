@@ -3,6 +3,7 @@ import {
   DEFAULT_ENDING_DURATION_SEC,
   type ProjectConfig,
 } from "./config-schema";
+import { getBuiltinAsset } from "./asset-registry";
 
 // The Remotion composition never sees AssetRef ids — only resolved sources.
 // `builtin: true` means "draw the built-in placeholder"; `src` is a usable URL
@@ -80,12 +81,16 @@ function resolveAsset(
       durationSec: fallback.durationSec,
     };
   }
+  const builtin = ref.kind === "builtin" ? getBuiltinAsset(ref.id) : undefined;
   // Uploads with a missing URL (e.g. after reload, blob gone) fall back to builtin.
   return {
     builtin: ref.kind !== "upload" || !url,
     src: url ?? null,
     builtinId: ref.kind === "builtin" ? ref.id : undefined,
-    durationSec: ref.durationSec,
+    // Registry metadata is authoritative even if a legacy caller bypasses
+    // ProjectConfig parsing and supplies stale or forged built-in metadata.
+    durationSec:
+      builtin?.mediaType === "video" ? builtin.durationSec : ref.durationSec,
   };
 }
 

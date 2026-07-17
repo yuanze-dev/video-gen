@@ -81,27 +81,20 @@ npm run dev
 
 ### 本地 CLI
 
-无需打开编辑器也可以用部分 JSON 配置直接校验和渲染：
+无需打开编辑器即可创建、校验、预览和渲染视频：
+
+Electron 桌面版可直接从顶栏点击 `CLI` → `安装 CLI`：安装器会把随 App 分发的受控启动器写入 `~/.local/bin`，按需配置新终端的 `PATH`，并在完成前执行版本自检；遇到已有同名命令、非稳定 App 路径或 shell 配置竞态时会停止并保留原内容，不要求管理员权限，也不会联网下载 CLI。
 
 ```bash
-node scripts/cli.mjs validate 配置.json
-node scripts/cli.mjs render 配置.json --out output/视频.mp4
-node scripts/cli.mjs assets
+npm run cli -- version --json
+npm run cli -- init video.json --minimal
+npm run cli -- validate video.json --json
+npm run cli -- plan video.json --json
+npm run cli -- still video.json --scene all --out-dir preview
+npm run cli -- render video.json --out output/video.mp4
 ```
 
-配置会深合并到默认模板。`validate` 的 stdout JSON 包含 `durationSec`、`openingSec`、`contentSec`、`endingSec`、`localFiles` 和 `canvas`；`assets` 返回内置素材的 `id/type/usage/desc`，其中默认片尾为 `flowprompter-outro`，使用位置是 `ending.video.asset`。自定义片尾可写成：
-
-```json
-{
-  "ending": {
-    "video": {
-      "asset": { "kind": "file", "path": "./my-outro.mp4" }
-    }
-  }
-}
-```
-
-CLI 会自动探测本地视频时长；也可在 `asset` 上显式提供 `durationSec`。总时长按 `opening + content + ending` 三段逐段对齐到帧后相加。
+本地开发用 `npm run cli --`；安装发行包后命令为 `littlestart`，兼容别名为 `video-gen`。JSON 机器输出使用 `{protocolVersion, ok, result|error}` 信封，命令字段以当前二进制的 `help`、`capabilities --json` 和 `config schema --json` 为准。完整的安装、锁文件、批处理、离线缓存与 Agent Skill 说明见 [README-CLI.md](README-CLI.md)。
 
 ---
 
@@ -114,6 +107,11 @@ CLI 会自动探测本地视频时长；也可在 `asset` 上显式提供 `durat
 | `npm run start` | 以生产模式启动 |
 | `npm run lint` | ESLint 检查 |
 | `npm run cli -- <命令>` | 运行无界面的本地校验 / 渲染 CLI |
+| `npm run build:cli` | 构建可分发 CLI 与内嵌 Remotion runtime |
+| `npm run pack:cli` | 生成 CLI `.tgz` 发行包 |
+| `npm run smoke:cli` | 安装并冒烟验证 CLI 发行包 |
+| `npm run test:cli` | 运行 CLI 测试套件 |
+| `npm run test:skills` | 校验 canonical / Codex / Claude / 随包 Skill 及文档镜像 |
 | `npm run build:remotion-site` | 仅把 `/remotion` 打包到 `public/remotion-site`（供托管站点 `serveUrl` 使用）|
 | `npm run electron:dev` | 编译并以源码运行桌面壳（加载 localhost UI）|
 | `npm run electron:build` | 构建并用 electron-builder 打包 macOS DMG |
@@ -155,15 +153,17 @@ public/assets/builtin/      # 内置默认素材（麦克风 / 设备 / 背景 /
 
 macOS DMG（Apple Silicon）通过 electron-builder 产出，配置见 [`electron-builder.yml`](electron-builder.yml)：
 
-- UI 远程加载，桌面包体仅含 Electron 主/预载 bundle + `@remotion/renderer` 及其原生 compositor，`chrome-headless-shell` 随 `extraResources` 一并附带。
+- UI 远程加载；桌面包携带 Electron 主/预载 bundle、`@remotion/renderer`、原生 compositor 与 Littlestart CLI runtime，`chrome-headless-shell` 和 CLI 均通过 `extraResources` 放在 `app.asar` 外。
 - 桌面更新会在后台下载，顶栏持续显示真实状态且不影响编辑与导出；下载完成后由用户选择合适时机重启。导出期间会保留已下载的安装包并暂时禁用重启，正常退出应用时也会自动完成安装。`v0.2.2` 可显示只读下载/错误状态，但不会暴露不安全的“立即重启”；`v0.2.1` 的旧壳会在下载后出现一次无法延后的重启提示，新版 Web 会提前说明这个迁移例外。
 - 客户端发行只接受已合入 `main` 的 `v*` tag。CI 会先预建唯一草稿 Release，再把 DMG、自动更新 ZIP、blockmap 和 manifest 上传到同一草稿，逐项核验后才公开；线上 UI 也只在 manifest、ZIP 和手动安装包都可用时展示更新。
-- 签名使用本地 *Developer ID Application* 证书（从钥匙串自动发现），开启 Hardened Runtime。
-- 公证由 `NOTARIZE` 环境变量控制（见 `build/notarize.cjs`）；缺省凭据时 `afterSign` 钩子为 no-op，仅做签名构建。
+- 签名使用 *Developer ID Application* 证书并开启 Hardened Runtime；生产凭据保存在 GitHub Actions Secrets。
+- 公证与 staple 统一由 `build/notarize.cjs` 完成；缺少 Apple 凭据时只允许本地签名构建。
 
 ```bash
 npm run electron:build
 ```
+
+生产发布只通过 [`.github/workflows/release.yml`](.github/workflows/release.yml) 的 `v*` tag 流程完成：tag 必须与 `package.json` 版本一致并指向 `main` 中的提交；内置素材权利清单不得残留待确认项，仓库变量 `CLI_DISTRIBUTION_APPROVED` 也必须在 Remotion 与第三方许可复核后设为 `true`。流水线会预建唯一 draft、完成签名/公证、核对 DMG、ZIP、blockmap 与 `latest-mac.yml` 后才公开 Release，禁止用手动 workflow 绕过这些门禁。
 
 ---
 

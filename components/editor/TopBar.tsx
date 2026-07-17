@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { RotateCcw, FileUp, FileDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ExportDialog } from "./ExportDialog";
+import { CliInstallDialog } from "./CliInstallDialog";
 import { DesktopUpdateIndicator } from "./DesktopUpdateIndicator";
 import { Logo } from "./Logo";
 import { useEditor } from "@/lib/store";
@@ -24,6 +25,17 @@ function useIsDesktop() {
   );
 }
 
+function useSupportsCliInstall() {
+  return useSyncExternalStore(
+    noopSubscribe,
+    () =>
+      window.electronRender?.supportsCliInstall === true &&
+      typeof window.electronRender.getCliInstallState === "function" &&
+      typeof window.electronRender.installCli === "function",
+    () => false,
+  );
+}
+
 export function TopBar() {
   const resetConfig = useEditor((s) => s.resetConfig);
   const exportJson = useEditor((s) => s.exportJson);
@@ -34,6 +46,7 @@ export function TopBar() {
   // lights float over the top-left of this header. When desktop, (a) let the
   // bar drag the window and (b) inset the logo clear of the lights.
   const isDesktop = useIsDesktop();
+  const supportsCliInstall = useSupportsCliInstall();
 
   const doExportJson = () => {
     const blob = new Blob([exportJson()], { type: "application/json" });
@@ -69,6 +82,7 @@ export function TopBar() {
         <Button variant="ghost" size="sm" onClick={doExportJson} title="导出配置 JSON">
           <FileDown className="size-4" /> 导出配置
         </Button>
+        {supportsCliInstall ? <CliInstallDialog /> : null}
         <Button
           variant="ghost"
           size="sm"

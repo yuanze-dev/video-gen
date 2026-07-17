@@ -1,0 +1,195 @@
+name: CLI
+
+on:
+  pull_request:
+    paths:
+      - "cli/**"
+      - "lib/**"
+      - "remotion/**"
+      - "skills/**"
+      - ".agents/skills/generate-video/**"
+      - ".claude/skills/generate-video/**"
+      - "packages/littlestart-cli/**"
+      - "README-CLI.md"
+      - "docs/cli/**"
+      - "ASSET_RIGHTS.md"
+      - "THIRD_PARTY_NOTICES.md"
+      - "scripts/*cli*.mjs"
+      - "tests/cli-*.test.mts"
+      - "tests/render-core.test.mts"
+      - "components/editor/CliInstallDialog.tsx"
+      - "components/editor/TopBar.tsx"
+      - "electron/**"
+      - "electron-builder.yml"
+      - "build/**"
+      - "public/assets/**"
+      - "scripts/build-remotion-site.mjs"
+      - "scripts/ensure-chrome.mjs"
+      - "tsconfig.electron.json"
+      - "package.json"
+      - "package-lock.json"
+      - "Dockerfile.cli"
+      - ".dockerignore"
+      - ".github/workflows/cli.yml"
+      - ".github/workflows/release.yml"
+  push:
+    branches: [main]
+    paths:
+      - "cli/**"
+      - "lib/**"
+      - "remotion/**"
+      - "skills/**"
+      - "packages/littlestart-cli/**"
+      - "README-CLI.md"
+      - "docs/cli/**"
+      - "ASSET_RIGHTS.md"
+      - "THIRD_PARTY_NOTICES.md"
+      - "scripts/*cli*.mjs"
+      - "tests/cli-*.test.mts"
+      - "tests/render-core.test.mts"
+      - "components/editor/CliInstallDialog.tsx"
+      - "components/editor/TopBar.tsx"
+      - "electron/**"
+      - "electron-builder.yml"
+      - "build/**"
+      - "public/assets/**"
+      - "scripts/build-remotion-site.mjs"
+      - "scripts/ensure-chrome.mjs"
+      - "tsconfig.electron.json"
+      - "package.json"
+      - "package-lock.json"
+      - "Dockerfile.cli"
+      - ".dockerignore"
+      - ".github/workflows/cli.yml"
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Types, lint, tests, skills
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx eslint cli lib remotion scripts tests
+      - run: npm run test:cli
+        env:
+          LITTLESTART_CHROMIUM_GL: swangle
+      - run: npm run test:cli:repro
+      - run: npm run test:skills
+
+  install-smoke:
+    name: Empty install · ${{ matrix.os }} · Node 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run smoke:cli
+        env:
+          LITTLESTART_CHROMIUM_GL: ${{ runner.os == 'Linux' && 'swangle' || '' }}
+
+  desktop:
+    name: Electron typecheck, tests, bundle
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx eslint components/editor/CliInstallDialog.tsx components/editor/TopBar.tsx electron
+      - run: npm run typecheck:electron
+      - run: npm run test:desktop
+      - run: npm run build:cli
+      - run: npm run build:electron
+      - run: node scripts/ensure-chrome.mjs
+      - name: Package app and verify embedded CLI resources
+        run: npx electron-builder --mac dir --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+  packaged-render:
+    name: Packaged headless render · Linux · Node 20
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run smoke:cli:render
+        env:
+          LITTLESTART_CHROMIUM_GL: swangle
+
+  docker-e2e:
+    name: Docker offline doctor + real render
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production CLI image
+        run: docker build --progress=plain -f Dockerfile.cli -t littlestart-cli:e2e .
+      - name: Verify prewarmed browser and WebGL offline
+        run: docker run --rm littlestart-cli:e2e doctor --offline --json
+      - name: Render MP4 and cover from a clean mounted workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="${RUNNER_TEMP}/littlestart-docker-e2e"
+          install -d -m 0777 "${workspace}"
+          mount="type=bind,src=${workspace},dst=/work"
+          docker run --rm --mount "${mount}" littlestart-cli:e2e \
+            init video.json --minimal --json
+          docker run --rm --mount "${mount}" littlestart-cli:e2e \
+            render video.json \
+            --out output/e2e.mp4 \
+            --cover output/e2e.jpg \
+            --resolution 720p \
+            --fps 30 \
+            --quality small \
+            --offline \
+            --json
+          test -s "${workspace}/output/e2e.mp4"
+          test -s "${workspace}/output/e2e.jpg"
+
+  package:
+    name: Build release tarball
+    runs-on: ubuntu-latest
+    needs: [quality, install-smoke, desktop, packaged-render, docker-e2e]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run pack:cli
+      - run: npm audit --omit=dev --audit-level=high
+      - uses: actions/upload-artifact@v4
+        with:
+          name: littlestart-cli-package
+          path: .artifacts/*.tgz
+          if-no-files-found: error
+          include-hidden-files: true

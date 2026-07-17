@@ -7,6 +7,44 @@ export const DESKTOP_UPDATE_CHANNELS = {
   stateChanged: "updater:state-changed",
 } as const;
 
+export const DESKTOP_CLI_CHANNELS = {
+  getState: "cli:get-state",
+  install: "cli:install",
+} as const;
+
+export type DesktopCliInstallState = {
+  status:
+    | "unsupported"
+    | "not-installed"
+    | "installing"
+    | "installed"
+    | "repair-needed"
+    | "conflict"
+    | "error";
+  bundledVersion?: string;
+  installedVersion?: string;
+  installPath?: string;
+  aliasPath?: string;
+  profilePath?: string;
+  pathConfigured?: boolean;
+  errorCode?:
+    | "UNSUPPORTED_PLATFORM"
+    | "APP_NOT_STABLE"
+    | "CLI_RUNTIME_MISSING"
+    | "EXISTING_COMMAND_CONFLICT"
+    | "VERIFY_FAILED"
+    | "INSTALL_BUSY"
+    | "ROLLBACK_FAILED"
+    | "CONFIRMATION_REQUIRED"
+    | "INSTALL_STATE_CHANGED";
+  message?: string;
+  retryable?: boolean;
+};
+
+export type DesktopCliInstallResult =
+  | { ok: true; state: DesktopCliInstallState }
+  | { ok: false; error: string; state: DesktopCliInstallState; canceled?: boolean };
+
 export type DesktopUpdateErrorPhase = "check" | "download" | "install";
 
 export type DesktopUpdateState = {
@@ -51,6 +89,7 @@ export type DesktopRenderBridge = {
   supportsUpdateStatus?: boolean;
   /** Native-ready signal plus the main-process export/restart interlock. */
   supportsSafeUpdateRestart?: boolean;
+  supportsCliInstall?: boolean;
   beginExportSession?: () => Promise<
     { ok: true; sessionId: string } | { ok: false; error: string }
   >;
@@ -74,6 +113,8 @@ export type DesktopRenderBridge = {
   retryUpdate?: () => Promise<DesktopUpdateCommandResult>;
   restartAndInstall?: () => Promise<DesktopUpdateCommandResult>;
   onUpdateState?: (callback: (state: DesktopUpdateState) => void) => () => void;
+  getCliInstallState?: () => Promise<DesktopCliInstallState>;
+  installCli?: () => Promise<DesktopCliInstallResult>;
 };
 
 export type DesktopUpdateClientMode =

@@ -11,7 +11,8 @@ publish:
   - provider: github
     owner: yuanze-dev
     repo: video-gen
-    # Keep the feed invisible until the workflow verifies every required asset.
+    # CI pre-creates exactly one draft. Keep every asset private until the
+    # workflow has verified the complete auto-update set and publishes it.
     releaseType: draft
 
 directories:
@@ -39,6 +40,9 @@ files:
   - "!.remotion-build${/*}"
   - "!.vercel${/*}"
   - "!release${/*}"
+  - "!.artifacts${/*}"
+  # The prebuilt CLI is copied once as a real-filesystem extraResource below.
+  - "!packages${/*}"
   # UI / build-only production deps (NOT in @remotion/renderer's runtime closure)
   - "!node_modules/next${/*}"
   - "!node_modules/@next${/*}"
@@ -79,6 +83,10 @@ files:
 extraResources:
   - from: node_modules/.remotion/chrome-headless-shell
     to: render-bin/chrome-headless-shell
+  # Keep the CLI runtime outside app.asar: its integrity checker and Remotion
+  # renderer expect ordinary files, and the launcher can then survive any cwd.
+  - from: packages/littlestart-cli
+    to: cli
 
 asar: true
 # Native binaries must be on the real filesystem to be executed/dlopen'd.
@@ -87,6 +95,9 @@ asarUnpack:
   - "node_modules/@remotion/renderer/**/*"
 
 npmRebuild: false
+
+# Verify the final app's real resource layout before signing/publishing.
+afterPack: build/verify-cli-resource.cjs
 
 # Notarize + staple after signing when notarization credentials are present in
 # the env (NOTARY_PROFILE / APPLE_API_* / APPLE_ID+APPLE_APP_SPECIFIC_PASSWORD+
@@ -115,6 +126,9 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  # build/notarize.cjs owns the single notarize + staple pass. Without this,
+  # electron-builder submits once and the afterSign hook submits a second time.
+  notarize: false
 
 # Drag-to-install window: branded background, app icon on the left, an arrow,
 # and the /Applications alias on the right.

@@ -1,0 +1,26 @@
+{
+  "name": "@yuanze/littlestart-cli",
+  "version": "0.1.0",
+  "description": "小音符起号助手的无界面本地视频生成 CLI",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "bin": {
+    "littlestart": "dist/littlestart.cjs",
+    "video-gen": "dist/littlestart.cjs"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "ASSET_RIGHTS.md",
+    "THIRD_PARTY_NOTICES.md",
+    "runtime",
+    "skills"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@remotion/media-parser": "4.0.481",
+    "@remotion/renderer": "4.0.481"
+  }
+}

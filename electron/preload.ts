@@ -4,7 +4,10 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { ExportOptions } from "../lib/export-options";
 import {
+  DESKTOP_CLI_CHANNELS,
   DESKTOP_UPDATE_CHANNELS,
+  type DesktopCliInstallResult,
+  type DesktopCliInstallState,
   type DesktopRenderBridge,
   type DesktopUpdateState,
 } from "../lib/desktop-bridge";
@@ -41,6 +44,10 @@ const electronRender = {
   // electron-updater download operation, then atomically blocks new exports
   // after the user chooses restart. Old v0.2.2 shells do not expose this flag.
   supportsSafeUpdateRestart: true as const,
+  // This shell carries the CLI runtime and exposes fixed, no-argument install
+  // operations. Older shells omit the flag, so a newly deployed Web UI hides
+  // the entry instead of presenting a button that cannot work.
+  supportsCliInstall: true as const,
 
   beginExportSession: (): Promise<
     { ok: true; sessionId: string } | { ok: false; error: string }
@@ -83,6 +90,12 @@ const electronRender = {
     ipcRenderer.on(DESKTOP_UPDATE_CHANNELS.stateChanged, handler);
     return () => ipcRenderer.off(DESKTOP_UPDATE_CHANNELS.stateChanged, handler);
   },
+
+  getCliInstallState: (): Promise<DesktopCliInstallState> =>
+    ipcRenderer.invoke(DESKTOP_CLI_CHANNELS.getState),
+
+  installCli: (): Promise<DesktopCliInstallResult> =>
+    ipcRenderer.invoke(DESKTOP_CLI_CHANNELS.install),
 } satisfies DesktopRenderBridge;
 
 contextBridge.exposeInMainWorld("electronRender", electronRender);

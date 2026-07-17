@@ -200,7 +200,13 @@ export function createDesktopUpdaterController({
       return { ok: false, busy: true, error: "应用正在准备重启" };
     }
     if (!restartGuard.commit()) {
-      return { ok: false, busy: true, error: "应用正在准备重启" };
+      return {
+        ok: false,
+        busy: true,
+        error: restartGuard.hasActiveRestartBlocker()
+          ? "CLI 正在安装，请完成后再重启更新"
+          : "应用正在准备重启",
+      };
     }
 
     operationPhase = "install";

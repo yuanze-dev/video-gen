@@ -1,7 +1,7 @@
 import { isDesktopReleaseReady, selectDesktopRelease } from "@/lib/desktop-release";
 
-const TARGET_RELEASE_TAG = "v0.2.3";
-const FALLBACK_RELEASE_TAG = "v0.2.2";
+const TARGET_RELEASE_TAG = "v0.2.4";
+const FALLBACK_RELEASE_TAG = "v0.2.3";
 const RELEASE_BASE = "https://github.com/yuanze-dev/video-gen/releases";
 const RESPONSE_HEADERS = { "Cache-Control": "private, no-store" };
 

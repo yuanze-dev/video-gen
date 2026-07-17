@@ -184,17 +184,21 @@ test("release metadata and the release API target stay synchronized", () => {
   assert.match(route, /updaterOk: updaterResponse\.ok/);
   assert.doesNotMatch(workflow, /workflow_dispatch/);
   assert.match(workflow, /git merge-base --is-ancestor/);
-  assert.match(workflow, /Prepare a single draft release/);
-  assert.match(workflow, /gh release create "\$VERSION" --draft --verify-tag/);
-  assert.match(workflow, /Found \$COUNT releases for \$VERSION/);
+  assert.match(workflow, /Prepare unique draft release/);
+  assert.match(workflow, /gh release create "\$VERSION" --verify-tag --draft/);
+  assert.match(workflow, /Found \$COUNT release objects for \$VERSION/);
   assert.match(workflow, /gh api --paginate --slurp/);
-  assert.match(workflow, /jq --arg version "\$VERSION"/);
+  assert.match(workflow, /jq -c --arg VERSION "\$VERSION"/);
   assert.doesNotMatch(workflow, /--slurp[^\n]*--jq/);
-  assert.match(workflow, /for asset in latest-mac\.yml "\$ZIP" "\$BLOCKMAP" "\$DMG"/);
-  assert.match(workflow, /MANIFEST_ASSET_ID=/);
+  assert.match(
+    workflow,
+    /for asset in latest-mac\.yml "\$ZIP_NAME" "\$BLOCKMAP_NAME" "\$DMG_NAME"/,
+  );
+  assert.match(workflow, /for asset in latest-mac\.yml "\$ZIP_NAME" "\$DMG_NAME"; do/);
+  assert.match(workflow, /ASSET_ID=/);
   assert.match(workflow, /Accept: application\/octet-stream/);
   assert.doesNotMatch(workflow, /gh release download/);
-  assert.match(workflow, /releases\/\$RELEASE_ID" -F draft=false/);
+  assert.match(workflow, /-F draft=false -f make_latest=true/);
   assert.match(builder, /releaseType:\s*draft/);
 });
 
@@ -575,6 +579,10 @@ test("update UI stays non-modal and only hands off focus after a user retry", ()
   assert.doesNotMatch(editor, /RequiredUpdateGate/);
   assert.match(topBar, /DesktopUpdateIndicator/);
   assert.match(indicator, /data-update-indicator/);
+  assert.match(
+    main,
+    /DESKTOP_CLI_CHANNELS\.install[\s\S]+tryAcquireRestartBlocker[\s\S]+installer\.install/,
+  );
   assert.match(main, /render:session-begin[\s\S]+beginExportWithUpdateInterlock/);
   assert.match(main, /render:start[\s\S]+startRenderWithUpdateInterlock/);
 
@@ -1031,6 +1039,37 @@ test("the executable restart/export interlock is safe in both event orders", asy
     );
     assert.equal(started, false);
   }
+});
+
+test("an active CLI install critical section refuses updater restart until release", async () => {
+  const context = setupUpdater();
+  const { controller, restartGuard, updater } = context;
+  await prepareReadyInstaller(context);
+
+  const releaseCliInstall = restartGuard.tryAcquireRestartBlocker();
+  assert.ok(releaseCliInstall);
+  assert.deepEqual(controller.install(), {
+    ok: false,
+    busy: true,
+    error: "CLI 正在安装，请完成后再重启更新",
+  });
+  assert.equal(restartGuard.isCommitted(), false);
+  assert.equal(updater.quitCalls, 0);
+
+  releaseCliInstall();
+  assert.deepEqual(controller.install(), { ok: true });
+  assert.equal(restartGuard.isCommitted(), true);
+  assert.equal(updater.quitCalls, 1);
+});
+
+test("a committed updater restart refuses a new CLI install critical section", async () => {
+  const context = setupUpdater();
+  const { controller, restartGuard } = context;
+  await prepareReadyInstaller(context);
+
+  assert.deepEqual(controller.install(), { ok: true });
+  assert.equal(restartGuard.isCommitted(), true);
+  assert.equal(restartGuard.tryAcquireRestartBlocker(), null);
 });
 
 test("an old async cleanup cannot release a newer export activity lease", () => {
