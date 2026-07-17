@@ -144,6 +144,18 @@ type LockOwner = {
   released?: boolean;
 };
 
+function hasValidOwnerIdentity(
+  owner: LockOwner | null,
+): owner is LockOwner & { pid: number; token: string } {
+  return (
+    typeof owner?.pid === "number" &&
+    Number.isSafeInteger(owner.pid) &&
+    owner.pid > 0 &&
+    typeof owner.token === "string" &&
+    /^[a-f0-9]{32}$/.test(owner.token)
+  );
+}
+
 function parseLockOwner(value: string): LockOwner | null {
   const lines = value.split(/\r?\n/).filter(Boolean);
   if (lines.length === 0) return null;
@@ -258,10 +270,19 @@ async function staleLockCandidate(lockPath: string, staleMs: number): Promise<Fi
       }),
     ]);
     if (!sameFile(before, after) || !sameFile(before, pathStat)) return null;
-    if (!owner?.released && Date.now() - before.mtimeMs <= staleMs) return null;
-    // A live owner may legitimately be doing a long first-time bundle. It is
-    // safer to time out than to allow two writers into the cache.
-    return ownerIsAlive(owner) ? null : { dev: before.dev, ino: before.ino };
+    if (hasValidOwnerIdentity(owner)) {
+      // Complete metadata is written and fsynced before a caller enters its
+      // critical section. Once that PID is gone (or the owner recorded its
+      // release token), the inode is abandoned even if the crash was recent.
+      // Recover it immediately so a dead batch process cannot stall forever.
+      return owner.released || !ownerIsAlive(owner)
+        ? { dev: before.dev, ino: before.ino }
+        : null;
+    }
+    // Unparseable/partial metadata may belong to an owner that is still in the
+    // middle of creating the lock. Only age can prove that inode abandoned.
+    if (Date.now() - before.mtimeMs <= staleMs) return null;
+    return { dev: before.dev, ino: before.ino };
   } finally {
     await handle?.close().catch(() => {});
   }

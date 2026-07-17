@@ -6,6 +6,7 @@ import { RotateCcw, FileUp, FileDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ExportDialog } from "./ExportDialog";
 import { CliInstallDialog } from "./CliInstallDialog";
+import { DesktopUpdateIndicator } from "./DesktopUpdateIndicator";
 import { Logo } from "./Logo";
 import { useEditor } from "@/lib/store";
 import { cn } from "@/lib/utils";
@@ -65,12 +66,14 @@ export function TopBar() {
         isDesktop ? "drag-region pl-[88px] pr-4" : "px-4",
       )}
     >
-      <div className="flex items-center gap-2.5">
+      <div className="flex shrink-0 items-center gap-2.5">
         <Logo className="size-8 rounded-lg shadow-lg shadow-[#ff2d7e]/40" />
         <span className="text-sm font-semibold leading-none">小音符起号助手</span>
       </div>
 
-      <div className="flex-1" />
+      <div className="flex min-w-0 flex-1 justify-center px-2">
+        <DesktopUpdateIndicator />
+      </div>
 
       <div className={cn("flex items-center gap-3", isDesktop && "no-drag-region")}>
         <Button variant="ghost" size="sm" onClick={() => jsonInputRef.current?.click()} title="导入配置 JSON">

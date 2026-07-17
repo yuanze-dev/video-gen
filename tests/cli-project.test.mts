@@ -56,7 +56,10 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
 
 function generatedArtifacts(names: readonly string[]): string[] {
   return names.filter(
-    (name) => name.includes(".partial") || name.includes(".backup"),
+    (name) =>
+      name.includes(".partial") ||
+      name.includes(".backup") ||
+      name.includes(".cleanup"),
   );
 }
 
@@ -147,14 +150,144 @@ test("forced atomic replacement replaces a symlink, never its referent", async (
   });
 });
 
+test("no-force publication never clobbers a file that wins the publish race", async () => {
+  await withTempDir(async (dir) => {
+    const target = path.join(dir, "output.txt");
+    const foreign = "concurrent-winner";
+    const originalLink = fs.link;
+    const originalRename = fs.rename;
+    let planted = false;
+    const plantBeforePublish = async (source: unknown, destination: unknown) => {
+      if (
+        !planted &&
+        String(destination) === target &&
+        String(source).includes(".partial")
+      ) {
+        planted = true;
+        await fs.writeFile(target, foreign);
+      }
+    };
+    fs.link = (async (source, destination) => {
+      await plantBeforePublish(source, destination);
+      return originalLink(source, destination);
+    }) as typeof fs.link;
+    fs.rename = (async (source, destination) => {
+      await plantBeforePublish(source, destination);
+      return originalRename(source, destination);
+    }) as typeof fs.rename;
+
+    try {
+      await assert.rejects(
+        subject.writeFileAtomic(target, "must-not-clobber"),
+        /\u5df2\u5b58\u5728|--force/,
+      );
+    } finally {
+      fs.link = originalLink;
+      fs.rename = originalRename;
+    }
+
+    assert.equal(planted, true);
+    assert.equal(await fs.readFile(target, "utf8"), foreign);
+    assert.deepEqual(generatedArtifacts(await fs.readdir(dir)), []);
+  });
+});
+
+test("force verifies the inode captured by quarantine and restores a raced replacement", async () => {
+  await withTempDir(async (dir) => {
+    const target = path.join(dir, "output.txt");
+    const displacedOriginal = path.join(dir, "original-before-race.txt");
+    const foreign = "foreign-between-inspect-and-quarantine";
+    await fs.writeFile(target, "original");
+
+    const originalRename = fs.rename;
+    let intercepted = false;
+    fs.rename = (async (source, destination) => {
+      if (
+        !intercepted &&
+        String(source) === target &&
+        String(destination).endsWith(".backup")
+      ) {
+        intercepted = true;
+        await originalRename(target, displacedOriginal);
+        await fs.writeFile(target, foreign);
+      }
+      return originalRename(source, destination);
+    }) as typeof fs.rename;
+
+    try {
+      await assert.rejects(
+        subject.writeFileAtomic(target, "replacement", true),
+        /\u5e76\u53d1\u66f4\u6362|\u9694\u79bb/,
+      );
+    } finally {
+      fs.rename = originalRename;
+    }
+
+    assert.equal(intercepted, true);
+    assert.equal(await fs.readFile(target, "utf8"), foreign);
+    assert.equal(await fs.readFile(displacedOriginal, "utf8"), "original");
+    assert.deepEqual(generatedArtifacts(await fs.readdir(dir)), []);
+  });
+});
+
+test("force never deletes a foreign inode swapped into its cleanup quarantine", async () => {
+  await withTempDir(async (dir) => {
+    const target = path.join(dir, "output.txt");
+    const displacedOriginal = path.join(dir, "original-quarantine-inode.txt");
+    const foreign = "foreign-cleanup-replacement";
+    await fs.writeFile(target, "original");
+
+    const originalRename = fs.rename;
+    const originalRm = fs.rm;
+    let intercepted = false;
+    const swapQuarantine = async (file: string) => {
+      if (intercepted || !file.endsWith(".backup")) return;
+      intercepted = true;
+      await originalRename(file, displacedOriginal);
+      await fs.writeFile(file, foreign);
+    };
+    fs.rename = (async (source, destination) => {
+      if (String(source).endsWith(".backup") && String(destination).endsWith(".cleanup")) {
+        await swapQuarantine(String(source));
+      }
+      return originalRename(source, destination);
+    }) as typeof fs.rename;
+    fs.rm = (async (file, options) => {
+      await swapQuarantine(String(file));
+      return originalRm(file, options);
+    }) as typeof fs.rm;
+
+    let failure: unknown;
+    try {
+      await subject.writeFileAtomic(target, "replacement", true);
+    } catch (error) {
+      failure = error;
+    } finally {
+      fs.rename = originalRename;
+      fs.rm = originalRm;
+    }
+
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, /\u65e0\u6cd5\u5b89\u5168\u6e05\u7406|\u5e76\u53d1\u5199\u5165/);
+    assert.equal(intercepted, true);
+    assert.equal(await fs.readFile(target, "utf8"), "replacement");
+    assert.equal(await fs.readFile(displacedOriginal, "utf8"), "original");
+    const foreignRecovery = (await fs.readdir(dir)).find(
+      (name) => name.endsWith(".backup") || name.endsWith(".cleanup"),
+    );
+    assert.ok(foreignRecovery);
+    assert.equal(await fs.readFile(path.join(dir, foreignRecovery), "utf8"), foreign);
+  });
+});
+
 test("failed atomic restore preserves the only backup and reports its recovery path", async () => {
   await withTempDir(async (dir) => {
     const target = path.join(dir, "output.txt");
     await fs.writeFile(target, "original");
 
-    const originalRename = fs.rename;
+    const originalLink = fs.link;
     let activationFailed = false;
-    fs.rename = (async (from, to) => {
+    fs.link = (async (from, to) => {
       const source = String(from);
       const destination = String(to);
       if (source.endsWith(".partial") && destination === target) {
@@ -164,8 +297,8 @@ test("failed atomic restore preserves the only backup and reports its recovery p
       if (activationFailed && source.endsWith(".backup") && destination === target) {
         throw new Error("simulated restore failure");
       }
-      return originalRename(from, to);
-    }) as typeof fs.rename;
+      return originalLink(from, to);
+    }) as typeof fs.link;
 
     let failure: unknown;
     try {
@@ -173,13 +306,12 @@ test("failed atomic restore preserves the only backup and reports its recovery p
     } catch (error) {
       failure = error;
     } finally {
-      fs.rename = originalRename;
+      fs.link = originalLink;
     }
 
     assert.ok(failure instanceof Error);
-    assert.match(failure.message, /自动恢复原文件失败/);
+    assert.match(failure.message, /无法在不覆盖并发文件的前提下自动恢复原文件/);
     assert.match(failure.message, /simulated activation failure/);
-    assert.match(failure.message, /simulated restore failure/);
 
     const artifacts = generatedArtifacts(await fs.readdir(dir));
     assert.equal(artifacts.length, 1);

@@ -419,6 +419,169 @@ export function getCliConfigJsonSchema(): unknown {
   };
 }
 
+type FileIdentity = {
+  dev: number;
+  ino: number;
+};
+
+type AtomicWriteReceipt = {
+  target: string;
+  staged: FileIdentity;
+  previous: FileIdentity | null;
+  quarantinePath: string | null;
+  published: FileIdentity | null;
+};
+
+function identityOf(stat: { dev: number; ino: number }): FileIdentity {
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function sameFileIdentity(
+  left: FileIdentity | null,
+  right: FileIdentity | null,
+): boolean {
+  return left !== null && right !== null && left.dev === right.dev && left.ino === right.ino;
+}
+
+function hasFsErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code
+  );
+}
+
+async function lstatOrNull(file: string) {
+  return fs.lstat(file).catch((error) => {
+    if (hasFsErrorCode(error, "ENOENT")) return null;
+    throw error;
+  });
+}
+
+function uniqueAtomicSibling(file: string, kind: string): string {
+  return path.join(
+    path.dirname(file),
+    `.${path.basename(file)}.${process.pid}-${crypto.randomBytes(16).toString("hex")}.${kind}`,
+  );
+}
+
+async function restoreQuarantineNoClobber(
+  quarantinePath: string,
+  target: string,
+  expected: FileIdentity,
+): Promise<{ restored: boolean; recoveryPath: string }> {
+  const quarantined = await lstatOrNull(quarantinePath);
+  if (!sameFileIdentity(quarantined ? identityOf(quarantined) : null, expected)) {
+    return { restored: false, recoveryPath: quarantinePath };
+  }
+
+  try {
+    // link() is the portable no-clobber primitive. It restores the exact inode
+    // without ever replacing a directory entry that arrived concurrently.
+    await fs.link(quarantinePath, target);
+  } catch {
+    return { restored: false, recoveryPath: quarantinePath };
+  }
+
+  const [restored, stillQuarantined] = await Promise.all([
+    lstatOrNull(target),
+    lstatOrNull(quarantinePath),
+  ]);
+  if (
+    !sameFileIdentity(restored ? identityOf(restored) : null, expected) ||
+    !sameFileIdentity(stillQuarantined ? identityOf(stillQuarantined) : null, expected)
+  ) {
+    return { restored: false, recoveryPath: quarantinePath };
+  }
+
+  // quarantinePath has a per-operation random name. Once both links are
+  // verified, removing only this private name cannot remove the restored file.
+  try {
+    await fs.unlink(quarantinePath);
+    return { restored: true, recoveryPath: target };
+  } catch {
+    return { restored: false, recoveryPath: quarantinePath };
+  }
+}
+
+async function removeOwnedQuarantine(
+  ownedPath: string,
+  expected: FileIdentity,
+): Promise<void> {
+  const current = await lstatOrNull(ownedPath);
+  if (!current) return;
+  if (!sameFileIdentity(identityOf(current), expected)) {
+    throw new Error(`并发写入更换了待清理文件，已保留于: ${ownedPath}`);
+  }
+
+  // Never unlink the first pathname after an lstat. Move it to another unique
+  // name, verify exactly what rename captured, and only then remove that name.
+  const cleanupPath = uniqueAtomicSibling(ownedPath, "cleanup");
+  try {
+    await fs.rename(ownedPath, cleanupPath);
+  } catch (error) {
+    if (hasFsErrorCode(error, "ENOENT")) return;
+    throw error;
+  }
+
+  const moved = await lstatOrNull(cleanupPath);
+  if (!sameFileIdentity(moved ? identityOf(moved) : null, expected)) {
+    if (moved) {
+      const restored = await restoreQuarantineNoClobber(
+        cleanupPath,
+        ownedPath,
+        identityOf(moved),
+      );
+      throw new Error(
+        `并发写入更换了待清理文件，未删除该文件，已保留于: ${restored.recoveryPath}`,
+      );
+    }
+    throw new Error(`待清理文件在核验前消失: ${cleanupPath}`);
+  }
+
+  try {
+    await fs.unlink(cleanupPath);
+  } catch (error) {
+    throw new Error(
+      `无法清理已核验的隔离文件，文件仍保留在 ${cleanupPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+async function publishStagedNoClobber(
+  partial: string,
+  receipt: AtomicWriteReceipt,
+): Promise<void> {
+  await fs.link(partial, receipt.target);
+  receipt.published = receipt.staged;
+  const published = await lstatOrNull(receipt.target);
+  if (!sameFileIdentity(published ? identityOf(published) : null, receipt.published)) {
+    throw new Error(`输出路径在发布时被并发更换，未覆盖该文件: ${receipt.target}`);
+  }
+}
+
+async function restorePreviousOrThrow(
+  receipt: AtomicWriteReceipt,
+  activationError: unknown,
+): Promise<never> {
+  if (!receipt.previous || !receipt.quarantinePath) throw activationError;
+  const restored = await restoreQuarantineNoClobber(
+    receipt.quarantinePath,
+    receipt.target,
+    receipt.previous,
+  );
+  if (restored.restored) {
+    receipt.quarantinePath = null;
+    throw activationError;
+  }
+  throw new Error(
+    `替换输出文件失败，且无法在不覆盖并发文件的前提下自动恢复原文件。原文件或并发文件仍保留在 ${restored.recoveryPath}；请手动检查 ${receipt.target}。替换错误: ${activationError instanceof Error ? activationError.message : String(activationError)}`,
+    { cause: activationError },
+  );
+}
+
 export async function writeFileAtomic(
   target: string,
   contents: string,
@@ -426,54 +589,126 @@ export async function writeFileAtomic(
 ): Promise<string> {
   const absolute = path.resolve(target);
   await fs.mkdir(path.dirname(absolute), { recursive: true });
-  const partial = path.join(
-    path.dirname(absolute),
-    `.${path.basename(absolute)}.${process.pid}-${crypto.randomBytes(8).toString("hex")}.partial`,
-  );
-  let backup: string | undefined;
-  let preserveBackup = false;
+  const partial = uniqueAtomicSibling(absolute, "partial");
+  let staged: FileIdentity | null = null;
+  let failure: unknown;
   try {
     const handle = await fs.open(partial, "wx", 0o600);
     try {
+      // Capture ownership immediately so even a short write or fsync failure
+      // can clean only the staging inode created by this attempt.
+      staged = identityOf(await handle.stat());
       await handle.writeFile(contents);
       await handle.sync();
     } finally {
       await handle.close();
     }
 
-    const existing = await fs.lstat(absolute).catch(() => null);
-    if (existing?.isDirectory()) throw new Error(`输出路径是目录: ${absolute}`);
-    if (existing && !overwrite) throw new Error(`输出文件已存在: ${absolute}（使用 --force 覆盖）`);
-    if (existing) {
-      backup = `${partial}.backup`;
-      await fs.rename(absolute, backup);
-    }
-    try {
-      await fs.rename(partial, absolute);
-    } catch (error) {
-      if (backup) {
+    const receipt: AtomicWriteReceipt = {
+      target: absolute,
+      staged,
+      previous: null,
+      quarantinePath: null,
+      published: null,
+    };
+
+    if (!overwrite) {
+      try {
+        await publishStagedNoClobber(partial, receipt);
+      } catch (error) {
+        if (hasFsErrorCode(error, "EEXIST")) {
+          const existing = await lstatOrNull(absolute);
+          if (existing?.isDirectory()) throw new Error(`输出路径是目录: ${absolute}`);
+          throw new Error(`输出文件已存在: ${absolute}（使用 --force 覆盖）`);
+        }
+        throw error;
+      }
+    } else {
+      let completed = false;
+      for (let attempt = 0; attempt < 32 && !completed; attempt += 1) {
+        const existing = await lstatOrNull(absolute);
+        if (!existing) {
+          try {
+            await publishStagedNoClobber(partial, receipt);
+            completed = true;
+          } catch (error) {
+            if (hasFsErrorCode(error, "EEXIST")) continue;
+            throw error;
+          }
+          continue;
+        }
+        if (existing.isDirectory()) throw new Error(`输出路径是目录: ${absolute}`);
+
+        receipt.previous = identityOf(existing);
+        receipt.quarantinePath = uniqueAtomicSibling(absolute, "backup");
         try {
-          await fs.rename(backup, absolute);
-          backup = undefined;
-        } catch (restoreError) {
-          preserveBackup = true;
+          await fs.rename(absolute, receipt.quarantinePath);
+        } catch (error) {
+          receipt.previous = null;
+          receipt.quarantinePath = null;
+          if (hasFsErrorCode(error, "ENOENT")) continue;
+          throw error;
+        }
+
+        const quarantined = await lstatOrNull(receipt.quarantinePath);
+        const captured = quarantined ? identityOf(quarantined) : null;
+        if (!sameFileIdentity(captured, receipt.previous)) {
+          if (!captured) {
+            throw new Error(`输出文件在隔离核验前消失: ${receipt.quarantinePath}`);
+          }
+          const restored = await restoreQuarantineNoClobber(
+            receipt.quarantinePath,
+            absolute,
+            captured,
+          );
+          receipt.previous = null;
+          receipt.quarantinePath = null;
           throw new Error(
-            `替换输出文件失败，且自动恢复原文件失败。原文件备份仍保留在 ${backup}；请手动将其移动回 ${absolute}。替换错误: ${error instanceof Error ? error.message : String(error)}；恢复错误: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
+            `输出文件在隔离时被并发更换；未删除该文件，已保留于: ${restored.recoveryPath}`,
+          );
+        }
+
+        try {
+          await publishStagedNoClobber(partial, receipt);
+        } catch (error) {
+          await restorePreviousOrThrow(receipt, error);
+        }
+
+        try {
+          await removeOwnedQuarantine(receipt.quarantinePath, receipt.previous);
+          receipt.previous = null;
+          receipt.quarantinePath = null;
+          completed = true;
+        } catch (error) {
+          throw new Error(
+            `新文件已发布，但旧文件隔离区无法安全清理: ${error instanceof Error ? error.message : String(error)}`,
             { cause: error },
           );
         }
       }
-      throw error;
+      if (!completed) {
+        throw new Error(`输出路径持续发生并发更换，未覆盖任何未核验文件: ${absolute}`);
+      }
     }
-    if (backup) {
-      await fs.rm(backup, { force: true });
-      backup = undefined;
-    }
-    return absolute;
-  } finally {
-    await fs.rm(partial, { force: true }).catch(() => {});
-    if (backup && !preserveBackup) await fs.rm(backup, { force: true }).catch(() => {});
+  } catch (error) {
+    failure = error;
   }
+
+  if (staged) {
+    try {
+      await removeOwnedQuarantine(partial, staged);
+    } catch (cleanupError) {
+      failure = failure
+        ? new Error(
+            `${failure instanceof Error ? failure.message : String(failure)}；暂存文件清理也失败: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+            { cause: failure },
+          )
+        : cleanupError;
+    }
+  }
+
+  if (failure) throw failure;
+  return absolute;
 }
 
 export async function writeJsonAtomic(

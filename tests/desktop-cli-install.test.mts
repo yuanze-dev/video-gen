@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import {
   CLI_LAUNCHER_MARKER,
   CLI_PROFILE_START,
@@ -41,7 +41,7 @@ async function exists(file: string): Promise<boolean> {
 }
 
 async function fixture(
-  t: Parameters<typeof test>[1] extends (t: infer T) => unknown ? T : never,
+  t: TestContext,
   overrides: Partial<Parameters<typeof createDesktopCliInstaller>[0]> & { validCli?: boolean } = {},
 ) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "littlestart-cli-install-"));

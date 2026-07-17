@@ -131,6 +131,40 @@ test("serializes concurrent cache writers with a file lock", async () => {
   }
 });
 
+test("recovers a complete fresh lock immediately when its owner is dead", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "littlestart-lock-dead-owner-"));
+  const lockPath = path.join(directory, "bundle.lock");
+  try {
+    await fs.writeFile(
+      lockPath,
+      `${JSON.stringify({
+        pid: 2_147_483_647,
+        token: "0".repeat(32),
+        createdAt: new Date().toISOString(),
+      })}\n`,
+    );
+    let visits = 0;
+    await core.withFileLock(
+      lockPath,
+      async () => {
+        visits += 1;
+      },
+      {
+        // A complete dead-owner record is safe to recover without waiting for
+        // this age threshold. Partial metadata still observes the threshold.
+        staleMs: 60 * 60_000,
+        retryMinMs: 1,
+        retryMaxMs: 1,
+        timeoutMs: 500,
+      },
+    );
+    assert.equal(visits, 1);
+    assert.equal(await fs.lstat(lockPath).catch(() => null), null);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("stale guard cleanup cannot remove a fresh successor guard", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "littlestart-lock-recovery-"));
   const lockPath = path.join(directory, "bundle.lock");
@@ -280,8 +314,8 @@ test("a released quarantined contender is recovered without leaving a ghost lock
   let staleRenameIntercepted = false;
   let restoreLinkIntercepted = false;
 
-  const patchedReaddir: typeof fs.readdir = async (target, ...args) => {
-    const names = await originalReaddir(target, ...args);
+  const patchedReaddir = (async (target: Parameters<typeof fs.readdir>[0]) => {
+    const names = await originalReaddir(target);
     if (String(target) !== directory) return names;
     readdirCalls += 1;
     if (readdirCalls === 1) {
@@ -292,7 +326,7 @@ test("a released quarantined contender is recovered without leaving a ghost lock
       await allowSecondGuardScan.promise;
     }
     return names;
-  };
+  }) as typeof fs.readdir;
   const patchedRename: typeof fs.rename = async (source, destination) => {
     const sourcePath = String(source);
     const destinationPath = String(destination);
@@ -686,6 +720,131 @@ test("commits video and cover as one transaction and rolls back failures", async
     );
     assert.equal(await fs.readFile(video, "utf8"), "old-video");
     assert.equal(await fs.readFile(cover, "utf8"), "old-cover");
+    assert.equal(await fs.lstat(videoTemp).catch(() => null), null);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("no-overwrite multi-artifact rollback preserves an ABA replacement inode", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "littlestart-commit-no-force-aba-"));
+  const firstTarget = path.join(directory, "opening.jpg");
+  const secondTarget = path.join(directory, "content.jpg");
+  const firstTemporary = path.join(directory, ".opening.partial.jpg");
+  const missingSecondTemporary = path.join(directory, ".missing-content.partial.jpg");
+  const displacedPublished = path.join(directory, "published-before-race.jpg");
+  await fs.writeFile(firstTemporary, "published-by-transaction");
+
+  const originalRename = fs.rename.bind(fs);
+  let intercepted = false;
+  const patchedRename: typeof fs.rename = async (source, destination) => {
+    if (
+      !intercepted &&
+      String(source) === firstTarget &&
+      String(destination).endsWith(".cleanup")
+    ) {
+      intercepted = true;
+      await originalRename(firstTarget, displacedPublished);
+      await fs.writeFile(firstTarget, "foreign-replacement");
+    }
+    return originalRename(source, destination);
+  };
+  Object.defineProperty(fs, "rename", { configurable: true, value: patchedRename });
+
+  let failure: unknown;
+  try {
+    await core
+      .commitArtifactsAtomically([
+        { temporaryPath: firstTemporary, targetPath: firstTarget },
+        { temporaryPath: missingSecondTemporary, targetPath: secondTarget },
+      ])
+      .catch((error) => {
+        failure = error;
+      });
+  } finally {
+    Object.defineProperty(fs, "rename", { configurable: true, value: originalRename });
+  }
+
+  try {
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, /安全回滚|待清理文件/);
+    assert.equal(intercepted, true);
+    assert.equal(await fs.readFile(firstTarget, "utf8"), "foreign-replacement");
+    assert.equal(await fs.readFile(displacedPublished, "utf8"), "published-by-transaction");
+    assert.equal(await fs.lstat(secondTarget).catch(() => null), null);
+    assert.deepEqual(
+      (await fs.readdir(directory)).filter((name) => name.endsWith(".cleanup")),
+      [],
+    );
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("overwrite multi-artifact rollback preserves foreign target and original backup", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "littlestart-commit-force-aba-"));
+  const firstTarget = path.join(directory, "opening.jpg");
+  const secondTarget = path.join(directory, "content.jpg");
+  const firstTemporary = path.join(directory, ".opening.partial.jpg");
+  const missingSecondTemporary = path.join(directory, ".missing-content.partial.jpg");
+  const displacedPublished = path.join(directory, "published-before-race.jpg");
+  await fs.writeFile(firstTarget, "original-opening");
+  await fs.writeFile(secondTarget, "original-content");
+  await fs.writeFile(firstTemporary, "published-by-transaction");
+
+  const originalRename = fs.rename.bind(fs);
+  let intercepted = false;
+  const patchedRename: typeof fs.rename = async (source, destination) => {
+    if (
+      !intercepted &&
+      String(source) === firstTarget &&
+      String(destination).endsWith(".cleanup")
+    ) {
+      intercepted = true;
+      await originalRename(firstTarget, displacedPublished);
+      await fs.writeFile(firstTarget, "foreign-replacement");
+    }
+    return originalRename(source, destination);
+  };
+  Object.defineProperty(fs, "rename", { configurable: true, value: patchedRename });
+
+  let failure: unknown;
+  try {
+    await core
+      .commitArtifactsAtomically(
+        [
+          { temporaryPath: firstTemporary, targetPath: firstTarget },
+          { temporaryPath: missingSecondTemporary, targetPath: secondTarget },
+        ],
+        true,
+      )
+      .catch((error) => {
+        failure = error;
+      });
+  } finally {
+    Object.defineProperty(fs, "rename", { configurable: true, value: originalRename });
+  }
+
+  try {
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, /安全回滚|无法在不覆盖并发文件/);
+    assert.equal(intercepted, true);
+    assert.equal(await fs.readFile(firstTarget, "utf8"), "foreign-replacement");
+    assert.equal(await fs.readFile(secondTarget, "utf8"), "original-content");
+    assert.equal(await fs.readFile(displacedPublished, "utf8"), "published-by-transaction");
+
+    const backupName = (await fs.readdir(directory)).find((name) => name.endsWith(".backup"));
+    assert.ok(backupName, "the original opening must remain in its receipt backup");
+    const backupPath = path.join(directory, backupName);
+    assert.equal(await fs.readFile(backupPath, "utf8"), "original-opening");
+    assert.match(
+      failure.message,
+      new RegExp(backupPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
+    assert.deepEqual(
+      (await fs.readdir(directory)).filter((name) => name.endsWith(".cleanup")),
+      [],
+    );
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

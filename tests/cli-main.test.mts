@@ -225,8 +225,8 @@ test("version, capabilities, and help expose the production command surface", as
   assert.equal(versionBody.command, "version");
   assert.equal(versionBody.result?.name, "littlestart");
   assert.equal(versionBody.result?.package, "@yuanze/littlestart-cli");
-  assert.equal(versionBody.result?.runtime.template, "teleprompter@1.0.0");
-  assert.match(versionBody.result?.runtime.bundleDigest, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(versionBody.result?.runtime?.template, "teleprompter@1.0.0");
+  assert.match(versionBody.result?.runtime?.bundleDigest ?? "", /^sha256:[a-f0-9]{64}$/);
 
   const capabilities = await runCli(["capabilities", "--json"], { cwd });
   assert.equal(capabilities.code, 0);
@@ -234,13 +234,13 @@ test("version, capabilities, and help expose the production command surface", as
   const capabilitiesBody = envelope(capabilities);
   assert.equal(capabilitiesBody.result?.offlineLocalRender, true);
   assert.equal(capabilitiesBody.result?.remoteAssets, false);
-  assert.deepEqual(capabilitiesBody.result?.export.resolution, ["1080p", "720p"]);
+  assert.deepEqual(capabilitiesBody.result?.export?.resolution, ["1080p", "720p"]);
   assert.ok(
-    capabilitiesBody.result?.commands.some(
+    capabilitiesBody.result?.commands?.some(
       (command: { id: string }) => command.id === "skill.install",
     ),
   );
-  assert.equal(capabilitiesBody.result?.templates[0].ref, "teleprompter@1.0.0");
+  assert.equal(capabilitiesBody.result?.templates?.[0]?.ref, "teleprompter@1.0.0");
 
   const help = await runCli(["help", "skill", "install"], { cwd });
   assert.equal(help.code, 0);
@@ -310,7 +310,7 @@ test("init, validate, plan, and stdin form a headless project workflow", async (
   assert.equal(validatedBody.result?.valid, true);
   assert.equal(validatedBody.result?.locked, false);
   assert.deepEqual(validatedBody.result?.localFiles, []);
-  assert.ok(validatedBody.result?.plan.timeline.total.frames > 0);
+  assert.ok((validatedBody.result?.plan?.timeline.total.frames ?? 0) > 0);
 
   const stdinConfig = JSON.stringify({
     opening: { title: { text: "stdin title" } },
@@ -326,8 +326,8 @@ test("init, validate, plan, and stdin form a headless project workflow", async (
   assert.equal(planned.code, 0);
   const plannedBody = envelope(planned);
   assert.equal(plannedBody.result?.source, "-");
-  assert.equal(plannedBody.result?.plan.output.width, 720);
-  assert.equal(plannedBody.result?.plan.output.height, 1280);
+  assert.equal(plannedBody.result?.plan?.output.width, 720);
+  assert.equal(plannedBody.result?.plan?.output.height, 1280);
 
   const invalidStdin = await runCli(["validate", "-", "--json"], {
     cwd,
@@ -351,7 +351,7 @@ test("schema and resolve describe and materialize the accepted partial config", 
     "https://yuanze.dev/schemas/littlestart/teleprompter-v1.json",
   );
   assert.equal(schemaBody.result?.additionalProperties, false);
-  assert.match(schemaBody.result?.description, /Partial configuration/);
+  assert.match(schemaBody.result?.description ?? "", /Partial configuration/);
 
   const resolved = await runCli(["config", "resolve", config, "--json"], {
     cwd,
@@ -417,7 +417,7 @@ test("config lock round-trips and detects same-size asset tampering", async () =
     { cwd },
   );
   assert.equal(locked.code, 0);
-  assert.match(envelope(locked).result?.digest, /^sha256:[a-f0-9]{64}$/);
+  assert.match(envelope(locked).result?.digest ?? "", /^sha256:[a-f0-9]{64}$/);
   const lockJson = JSON.parse(await fs.readFile(lock, "utf8"));
   assert.equal(lockJson.assets.length, 1);
   assert.deepEqual(lockJson.export, { quality: "small", resolution: "720p", fps: 30 });
@@ -499,9 +499,9 @@ test("JSON and NDJSON reserve stdout for one parseable protocol", async () => {
   assert.equal(failure.code, 2);
   const failureEvents = ndjson(failure);
   assert.equal(failureEvents.length, 1);
-  assert.equal(failureEvents[0].event, "error");
-  assert.equal(failureEvents[0].data.ok, false);
-  assert.equal(failureEvents[0].data.error.code, "UNKNOWN_COMMAND");
+  assert.equal(failureEvents[0]?.event, "error");
+  assert.equal(failureEvents[0]?.data.ok, false);
+  assert.equal(failureEvents[0]?.data.error?.code, "UNKNOWN_COMMAND");
   // --quiet suppresses chatter, but final diagnostics remain visible.
   assert.match(failure.stderr, /UNKNOWN_COMMAND/);
 });

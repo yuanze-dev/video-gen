@@ -1,6 +1,6 @@
 import http from "node:http";
 import path from "node:path";
-import { createReadStream } from "node:fs";
+import { constants, createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import type { Socket } from "node:net";
@@ -493,6 +493,251 @@ function isExistsError(error: unknown): boolean {
   );
 }
 
+function isMissingError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
+type FileIdentity = {
+  dev: number;
+  ino: number;
+};
+
+type InstalledArtifactReceipt = {
+  source: string;
+  target: string;
+  identity: FileIdentity;
+};
+
+type BackupArtifactReceipt = {
+  target: string;
+  backup: string;
+  identity: FileIdentity;
+};
+
+function identityOf(stat: { dev: number; ino: number }): FileIdentity {
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function sameFileIdentity(
+  left: FileIdentity | null,
+  right: FileIdentity | null,
+): boolean {
+  return left !== null && right !== null && left.dev === right.dev && left.ino === right.ino;
+}
+
+async function lstatOrNull(file: string) {
+  return fs.lstat(file).catch((error) => {
+    if (isMissingError(error)) return null;
+    throw error;
+  });
+}
+
+function uniqueTransactionSibling(file: string, kind: string): string {
+  return path.join(
+    path.dirname(file),
+    `.${path.basename(file)}.${process.pid}-${crypto.randomBytes(16).toString("hex")}.${kind}`,
+  );
+}
+
+async function restoreQuarantineNoClobber(
+  quarantinePath: string,
+  target: string,
+  expected: FileIdentity,
+): Promise<{ restored: boolean; recoveryPath: string }> {
+  const quarantined = await lstatOrNull(quarantinePath);
+  if (!sameFileIdentity(quarantined ? identityOf(quarantined) : null, expected)) {
+    return { restored: false, recoveryPath: quarantinePath };
+  }
+
+  try {
+    // link() is the portable no-clobber primitive. A concurrent writer that
+    // already owns target wins, while the quarantined inode remains preserved.
+    await fs.link(quarantinePath, target);
+  } catch {
+    return { restored: false, recoveryPath: quarantinePath };
+  }
+
+  const [restored, stillQuarantined] = await Promise.all([
+    lstatOrNull(target),
+    lstatOrNull(quarantinePath),
+  ]);
+  if (
+    !sameFileIdentity(restored ? identityOf(restored) : null, expected) ||
+    !sameFileIdentity(stillQuarantined ? identityOf(stillQuarantined) : null, expected)
+  ) {
+    return { restored: false, recoveryPath: quarantinePath };
+  }
+
+  try {
+    // quarantinePath contains a per-operation random token and is never
+    // reused. Removing this verified private link cannot remove target.
+    await fs.unlink(quarantinePath);
+    return { restored: true, recoveryPath: target };
+  } catch {
+    return { restored: false, recoveryPath: quarantinePath };
+  }
+}
+
+async function removeOwnedTransactionPath(
+  ownedPath: string,
+  expected: FileIdentity,
+): Promise<void> {
+  const current = await lstatOrNull(ownedPath);
+  if (!current) return;
+  if (!sameFileIdentity(identityOf(current), expected)) {
+    throw new Error(`并发写入更换了待清理文件，已保留于: ${ownedPath}`);
+  }
+
+  // lstat + unlink has an ABA window. Move the pathname to a unique receipt
+  // quarantine, then delete only if rename captured the inode we published.
+  const cleanupPath = uniqueTransactionSibling(ownedPath, "cleanup");
+  try {
+    await fs.rename(ownedPath, cleanupPath);
+  } catch (error) {
+    if (isMissingError(error)) return;
+    throw error;
+  }
+
+  const moved = await lstatOrNull(cleanupPath);
+  const captured = moved ? identityOf(moved) : null;
+  if (!sameFileIdentity(captured, expected)) {
+    if (captured) {
+      const restored = await restoreQuarantineNoClobber(cleanupPath, ownedPath, captured);
+      throw new Error(
+        `并发写入更换了待清理文件，未删除该文件，已保留于: ${restored.recoveryPath}`,
+      );
+    }
+    throw new Error(`待清理文件在核验前消失: ${cleanupPath}`);
+  }
+
+  try {
+    await fs.unlink(cleanupPath);
+  } catch (error) {
+    throw new Error(
+      `无法清理已核验的隔离文件，文件仍保留在 ${cleanupPath}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+async function publishArtifactNoClobber(
+  artifact: Artifact,
+): Promise<InstalledArtifactReceipt> {
+  let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
+  try {
+    handle = await fs.open(
+      artifact.temporaryPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    const staged = await handle.stat();
+    if (!staged.isFile()) {
+      throw new Error(`渲染暂存路径不是普通文件: ${artifact.temporaryPath}`);
+    }
+    const expected = identityOf(staged);
+
+    await fs.link(artifact.temporaryPath, artifact.targetPath);
+    const published = await lstatOrNull(artifact.targetPath);
+    if (!sameFileIdentity(published ? identityOf(published) : null, expected)) {
+      throw new Error(`输出路径在发布时被并发更换，未覆盖该文件: ${artifact.targetPath}`);
+    }
+    return {
+      source: artifact.temporaryPath,
+      target: artifact.targetPath,
+      identity: expected,
+    };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function quarantineOverwriteTarget(
+  target: string,
+): Promise<BackupArtifactReceipt | null> {
+  const existing = await lstatOrNull(target);
+  if (!existing) return null;
+  if (existing.isDirectory()) throw new Error(`输出路径是目录: ${target}`);
+
+  const expected = identityOf(existing);
+  const backup = uniqueTransactionSibling(target, "backup");
+  try {
+    await fs.rename(target, backup);
+  } catch (error) {
+    if (isMissingError(error)) return null;
+    throw error;
+  }
+
+  const moved = await lstatOrNull(backup);
+  const captured = moved ? identityOf(moved) : null;
+  if (!sameFileIdentity(captured, expected)) {
+    if (!captured) throw new Error(`输出文件在隔离核验前消失: ${backup}`);
+    const restored = await restoreQuarantineNoClobber(backup, target, captured);
+    throw new Error(
+      `输出文件在隔离时被并发更换；未删除该文件，已保留于: ${restored.recoveryPath}`,
+    );
+  }
+  return { target, backup, identity: expected };
+}
+
+async function rollbackArtifactTransaction(
+  installed: InstalledArtifactReceipt[],
+  backups: BackupArtifactReceipt[],
+): Promise<Error[]> {
+  const failures: Error[] = [];
+  for (const receipt of [...installed].reverse()) {
+    try {
+      await removeOwnedTransactionPath(receipt.target, receipt.identity);
+    } catch (error) {
+      failures.push(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+  for (const receipt of [...backups].reverse()) {
+    const restored = await restoreQuarantineNoClobber(
+      receipt.backup,
+      receipt.target,
+      receipt.identity,
+    );
+    if (!restored.restored) {
+      failures.push(
+        new Error(
+          `无法在不覆盖并发文件的前提下恢复原产物；原产物仍保留在 ${restored.recoveryPath}`,
+        ),
+      );
+    }
+  }
+  return failures;
+}
+
+function transactionFailure(error: unknown, rollbackFailures: Error[]): Error {
+  const original = error instanceof Error ? error : new Error(String(error));
+  if (rollbackFailures.length === 0) return original;
+  return new Error(
+    `提交产物失败，且安全回滚保留了需要人工检查的文件: ${rollbackFailures.map((failure) => failure.message).join("；")}。原始错误: ${original.message}`,
+    { cause: original },
+  );
+}
+
+async function cleanupCommittedTransaction(
+  installed: InstalledArtifactReceipt[],
+  backups: BackupArtifactReceipt[],
+): Promise<void> {
+  // A committed output remains valid even if an unrelated process replaced a
+  // private staging/backup pathname. Cleanup is best-effort, but every attempt
+  // is receipt-checked so it can never delete that foreign inode.
+  await Promise.allSettled([
+    ...installed.map((receipt) =>
+      removeOwnedTransactionPath(receipt.source, receipt.identity),
+    ),
+    ...backups.map((receipt) =>
+      removeOwnedTransactionPath(receipt.backup, receipt.identity),
+    ),
+  ]);
+}
+
 async function prepareArtifactTargets(artifacts: Artifact[], overwrite: boolean): Promise<void> {
   const uniqueTargets = new Set<string>();
   for (const artifact of artifacts) {
@@ -517,49 +762,38 @@ export async function commitArtifactsAtomically(
 ): Promise<void> {
   await prepareArtifactTargets(artifacts, overwrite);
 
-  if (!overwrite) {
-    const installed: string[] = [];
-    try {
-      // The temporary file lives beside its target, so a hard link gives us a
-      // true atomic, no-clobber install without copying a potentially huge MP4.
-      for (const artifact of artifacts) {
-        await fs.link(artifact.temporaryPath, artifact.targetPath);
-        installed.push(artifact.targetPath);
-      }
-      await Promise.all(artifacts.map((artifact) => fs.rm(artifact.temporaryPath, { force: true })));
-      return;
-    } catch (error) {
-      await Promise.all(installed.map((target) => fs.rm(target, { force: true }).catch(() => {})));
-      if (isExistsError(error)) {
-        throw new Error("提交产物时发现同名文件；未覆盖任何已有文件", { cause: error });
-      }
-      throw error;
-    }
-  }
-
-  const backups: { target: string; backup: string }[] = [];
-  const installed: string[] = [];
+  const backups: BackupArtifactReceipt[] = [];
+  const installed: InstalledArtifactReceipt[] = [];
   try {
-    for (const artifact of artifacts) {
-      const existing = await fs.lstat(artifact.targetPath).catch(() => null);
-      if (!existing) continue;
-      if (existing.isDirectory()) throw new Error(`输出路径是目录: ${artifact.targetPath}`);
-      const backup = temporaryArtifactPath(artifact.targetPath, ".backup");
-      await fs.rename(artifact.targetPath, backup);
-      backups.push({ target: artifact.targetPath, backup });
+    if (overwrite) {
+      for (const artifact of artifacts) {
+        const backup = await quarantineOverwriteTarget(artifact.targetPath);
+        if (backup) backups.push(backup);
+      }
     }
+
+    // The temporary file lives beside its target, so a hard link gives every
+    // mode the same atomic no-clobber publish primitive. overwrite applies only
+    // to the inode explicitly captured in backups, never to a later contender.
     for (const artifact of artifacts) {
-      await fs.rename(artifact.temporaryPath, artifact.targetPath);
-      installed.push(artifact.targetPath);
+      installed.push(await publishArtifactNoClobber(artifact));
     }
   } catch (error) {
-    await Promise.all(installed.map((target) => fs.rm(target, { force: true }).catch(() => {})));
-    for (const backup of backups.reverse()) {
-      await fs.rename(backup.backup, backup.target).catch(() => {});
+    const rollbackFailures = await rollbackArtifactTransaction(installed, backups);
+    await Promise.allSettled(
+      installed.map((receipt) =>
+        removeOwnedTransactionPath(receipt.source, receipt.identity),
+      ),
+    );
+    if (!overwrite && isExistsError(error)) {
+      throw transactionFailure(
+        new Error("提交产物时发现同名文件；未覆盖任何已有文件", { cause: error }),
+        rollbackFailures,
+      );
     }
-    throw error;
+    throw transactionFailure(error, rollbackFailures);
   }
-  await Promise.all(backups.map(({ backup }) => fs.rm(backup, { force: true }).catch(() => {})));
+  await cleanupCommittedTransaction(installed, backups);
 }
 
 function temporaryArtifactPath(target: string, extension: string): string {
@@ -820,6 +1054,7 @@ export async function renderVideo(params: RenderParams): Promise<RenderOutput> {
   await prepareArtifactTargets(artifacts, params.overwrite === true);
 
   let prepared: PreparedRender | undefined;
+  let commitAttempted = false;
   try {
     prepared = await prepareRender(params);
     const durationSec = totalSec(prepared.resolved);
@@ -874,6 +1109,7 @@ export async function renderVideo(params: RenderParams): Promise<RenderOutput> {
       throwIfAborted(params.signal);
     }
 
+    commitAttempted = true;
     await commitArtifactsAtomically(artifacts, params.overwrite === true);
     return {
       outputPath: videoTarget,
@@ -885,11 +1121,13 @@ export async function renderVideo(params: RenderParams): Promise<RenderOutput> {
     throw prepared ? normalizeRenderError(error, params.signal) : error;
   } finally {
     await prepared?.close();
-    await Promise.all(
-      [videoTemporary, coverTemporary]
-        .filter((file): file is string => Boolean(file))
-        .map((file) => fs.rm(file, { force: true }).catch(() => {})),
-    );
+    if (!commitAttempted) {
+      await Promise.all(
+        [videoTemporary, coverTemporary]
+          .filter((file): file is string => Boolean(file))
+          .map((file) => fs.rm(file, { force: true }).catch(() => {})),
+      );
+    }
   }
 }
 
@@ -905,6 +1143,7 @@ export async function renderStill(params: RenderStillParams): Promise<RenderStil
   await prepareArtifactTargets(artifacts, params.overwrite === true);
 
   let prepared: PreparedRender | undefined;
+  let commitAttempted = false;
   try {
     prepared = await prepareRender(params);
     const scene = params.frame === undefined ? (params.scene ?? "opening") : null;
@@ -927,13 +1166,16 @@ export async function renderStill(params: RenderStillParams): Promise<RenderStil
       }),
     );
     throwIfAborted(params.signal);
+    commitAttempted = true;
     await commitArtifactsAtomically(artifacts, params.overwrite === true);
     return { outputPath: target, frame, scene };
   } catch (error) {
     throw prepared ? normalizeRenderError(error, params.signal) : error;
   } finally {
     await prepared?.close();
-    await fs.rm(temporary, { force: true }).catch(() => {});
+    if (!commitAttempted) {
+      await fs.rm(temporary, { force: true }).catch(() => {});
+    }
   }
 }
 
@@ -962,6 +1204,7 @@ export async function renderSceneStills(
   );
 
   let prepared: PreparedRender | undefined;
+  let commitAttempted = false;
   try {
     prepared = await prepareRender(params);
     for (const job of jobs) {
@@ -985,6 +1228,7 @@ export async function renderSceneStills(
       throwIfAborted(params.signal);
     }
 
+    commitAttempted = true;
     await commitArtifactsAtomically(
       jobs.map((job) => job.artifact),
       params.overwrite === true,
@@ -1002,8 +1246,10 @@ export async function renderSceneStills(
     throw prepared ? normalizeRenderError(error, params.signal) : error;
   } finally {
     await prepared?.close();
-    await Promise.all(
-      jobs.map((job) => fs.rm(job.artifact.temporaryPath, { force: true }).catch(() => {})),
-    );
+    if (!commitAttempted) {
+      await Promise.all(
+        jobs.map((job) => fs.rm(job.artifact.temporaryPath, { force: true }).catch(() => {})),
+      );
+    }
   }
 }

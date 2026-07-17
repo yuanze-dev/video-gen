@@ -1,6 +1,6 @@
 name: Release (macOS)
 
-# Push a version tag on main (e.g. v0.2.3) to build, sign, notarize and publish.
+# Push a stable version tag on main (e.g. v0.2.4) to build, sign, notarize and publish.
 on:
   push:
     tags:
@@ -13,20 +13,17 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write # create/upload the GitHub Release (auto-update feed) in this repo
+  contents: write
 
 jobs:
   build-mac:
-    runs-on: macos-14 # Apple Silicon (arm64)
+    runs-on: macos-14
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # Fail fast with a clear message if signing/notarization secrets are absent.
-      # (GitHub passes unset secrets as empty strings, which makes electron-builder
-      # choke with a cryptic "not a file" error.)
       - name: Check required secrets
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -35,15 +32,15 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          miss=""
-          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!v}" ]; then miss="$miss $v"; fi
+          set -euo pipefail
+          missing=""
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
           done
-          if [ -n "$miss" ]; then
-            echo "::error::Missing required repo secrets:$miss — add them in Settings → Secrets and variables → Actions"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required repository secrets:$missing"
             exit 1
           fi
-          echo "All required secrets present."
 
       - uses: actions/setup-node@v4
         with:
@@ -56,17 +53,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
-            echo "::error::Production releases must run from a version tag"
-            exit 1
-          fi
           EXPECTED="v$(node -p "require('./package.json').version")"
-          if [ "$GITHUB_REF_NAME" != "$EXPECTED" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package version $EXPECTED"
+          if [ "$GITHUB_REF_TYPE" != "tag" ] || [ "$GITHUB_REF_NAME" != "$EXPECTED" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME must match stable package version $EXPECTED"
             exit 1
           fi
+          TAGGED_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
           git fetch origin main:refs/remotes/origin/main --no-tags
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+          if ! git merge-base --is-ancestor "$TAGGED_COMMIT" origin/main; then
             echo "::error::Release tag must point to a commit contained in origin/main"
             exit 1
           fi
@@ -110,29 +104,36 @@ jobs:
             exit 1
           }
           if [ "$CLI_DISTRIBUTION_APPROVED" != "true" ]; then
-            echo "::error::Set repository variable CLI_DISTRIBUTION_APPROVED=true after Remotion and third-party review"
+            echo "::error::Set CLI_DISTRIBUTION_APPROVED=true after Remotion and third-party review"
             exit 1
           fi
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Ensure headless Chromium (chrome-headless-shell)
+      - name: Ensure headless Chromium
         run: node scripts/ensure-chrome.mjs
 
-      - name: Build CLI, Remotion site + Electron bundles
+      - name: Verify Web, CLI, updater and Electron bundles
         run: |
-          npm run build:remotion-site
+          set -euo pipefail
+          npm run build
           npx tsc --noEmit
+          npm run typecheck:electron
+          npm run typecheck:tests
+          npm run test:update
+          npm run test:desktop
           npm run test:cli
           npm run test:cli:repro
           npm run test:skills
           npm run build:cli
-          npm run typecheck:electron
-          npm run test:desktop
           npm run build:electron
           npm audit --omit=dev --audit-level=high
 
+      # electron-builder starts separate asynchronous DMG and ZIP publishers.
+      # Pre-creating one current draft prevents them from racing into duplicate
+      # Release objects. Recreate an old draft because electron-publish only
+      # searches the first Releases API page.
       - name: Prepare unique draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -152,26 +153,12 @@ jobs:
               echo "::error::Refusing to overwrite an already-public release for $VERSION"
               exit 1
             fi
-            # electron-publish only searches the first Releases API page. A
-            # very old draft can therefore be invisible to it even though our
-            # paginated guard found it. Recreate the draft so this run always
-            # uploads into one current, empty release object.
             RELEASE_ID="$(jq -r '.[0].id' <<<"$MATCHES")"
             gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID"
           fi
           gh release create "$VERSION" --verify-tag --draft --title "$VERSION" --generate-notes
 
-      # One step does it all now that auto-update is in play:
-      #   • CSC_*  → sign the .app with the Developer ID cert (CSC_LINK = base64 .p12)
-      #   • APPLE_* → afterSign hook (build/notarize.cjs) notarizes AND staples the
-      #     .app, so BOTH the dmg and the auto-update zip ship a stapled, notarized
-      #     app (a dmg-only notarize would leave the zip's app unstapled → updates
-      #     download but Gatekeeper rejects them).
-      #   • GH_TOKEN → --publish always uploads dmg + zip + latest-mac.yml +
-      #     blockmap to this repo's Releases (see the publish: block in
-      #     electron-builder.yml). The repo is public, so clients read the feed
-      #     with no token; the default GITHUB_TOKEN has enough scope to publish.
-      - name: Build, sign, notarize & publish
+      - name: Build, sign, notarize and upload
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
@@ -181,9 +168,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: npx electron-builder --mac --publish always
 
-      # Keep the release private until every updater asset is present and the
-      # manifest names the package version. This also prevents partial releases
-      # from becoming the /releases/latest auto-update feed.
       - name: Verify and publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -191,17 +175,53 @@ jobs:
           set -euo pipefail
           RAW="$(node -p "require('./package.json').version")"
           VERSION="$GITHUB_REF_NAME"
-          COUNT="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            | jq --arg VERSION "$VERSION" '[.[][] | select(.tag_name == $VERSION)] | length')"
+          ZIP_NAME="littlestart-$RAW-arm64-mac.zip"
+          BLOCKMAP_NAME="$ZIP_NAME.blockmap"
+          DMG_NAME="littlestart-$RAW-arm64.dmg"
+          MATCHES="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -c --arg VERSION "$VERSION" '[.[][] | select(.tag_name == $VERSION)]')"
+          COUNT="$(jq 'length' <<<"$MATCHES")"
           if [ "$COUNT" -ne 1 ]; then
             echo "::error::Expected one release object for $VERSION, found $COUNT"
             exit 1
           fi
-          IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq .isDraft)"
-          if [ "$IS_DRAFT" != "true" ]; then
+          RELEASE_ID="$(jq -r '.[0].id' <<<"$MATCHES")"
+          RELEASE="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
+          if [ "$(jq -r '.tag_name' <<<"$RELEASE")" != "$VERSION" ]; then
+            echo "::error::Release $RELEASE_ID changed tag"
+            exit 1
+          fi
+          if [ "$(jq -r '.draft' <<<"$RELEASE")" != "true" ]; then
             echo "::error::Release $VERSION became public before verification"
             exit 1
           fi
+
+          for redundant in "video-gen-$RAW-arm64-mac.zip" "littlestart-$RAW-arm64.dmg.blockmap"; do
+            ASSET_ID="$(jq -r --arg name "$redundant" \
+              '[.assets[] | select(.name == $name) | .id][0] // empty' <<<"$RELEASE")"
+            if [ -n "$ASSET_ID" ]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID"
+            fi
+          done
+
+          RELEASE="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
+          EXPECTED_ASSETS="$(printf '%s\n' \
+            latest-mac.yml "$ZIP_NAME" "$BLOCKMAP_NAME" "$DMG_NAME" | LC_ALL=C sort)"
+          ACTUAL_ASSETS="$(jq -r '.assets[].name' <<<"$RELEASE" | LC_ALL=C sort)"
+          if [ "$ACTUAL_ASSETS" != "$EXPECTED_ASSETS" ]; then
+            echo "::error::Release assets do not match the exact updater set"
+            printf 'Expected:\n%s\nActual:\n%s\n' "$EXPECTED_ASSETS" "$ACTUAL_ASSETS"
+            exit 1
+          fi
+          for asset in latest-mac.yml "$ZIP_NAME" "$BLOCKMAP_NAME" "$DMG_NAME"; do
+            SIZE="$(jq -r --arg name "$asset" \
+              '[.assets[] | select(.name == $name) | .size][0] // 0' <<<"$RELEASE")"
+            if [ "$SIZE" -le 0 ]; then
+              echo "::error::Missing or empty release asset: $asset"
+              exit 1
+            fi
+          done
+
           PUBLIC_TAGS="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
             --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')"
           TARGET_TAG="$VERSION" PUBLIC_TAGS="$PUBLIC_TAGS" node <<'NODE'
@@ -224,46 +244,20 @@ jobs:
             return parsed && compare(parsed, target) >= 0;
           });
           if (blockingTag) {
-            throw new Error(
-              `Refusing to publish ${targetTag}; public release ${blockingTag} is not older`,
-            );
+            throw new Error(`Refusing to publish ${targetTag}; ${blockingTag} is not older`);
           }
           NODE
-          gh release delete-asset "$VERSION" "video-gen-$RAW-arm64-mac.zip" --yes || true
-          gh release delete-asset "$VERSION" "littlestart-$RAW-arm64.dmg.blockmap" --yes || true
-          ZIP_NAME="littlestart-$RAW-arm64-mac.zip"
-          DMG_NAME="littlestart-$RAW-arm64.dmg"
-          EXPECTED_ASSETS="$(printf '%s\n' \
-            latest-mac.yml \
-            "$ZIP_NAME" \
-            "$ZIP_NAME.blockmap" \
-            "$DMG_NAME" | LC_ALL=C sort)"
-          ACTUAL_ASSETS="$(gh release view "$VERSION" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
-          if [ "$ACTUAL_ASSETS" != "$EXPECTED_ASSETS" ]; then
-            echo "::error::Release assets do not match the exact updater set"
-            echo "Expected:"
-            printf '%s\n' "$EXPECTED_ASSETS"
-            echo "Actual:"
-            printf '%s\n' "$ACTUAL_ASSETS"
-            exit 1
-          fi
-          for ASSET in \
-            latest-mac.yml \
-            "$ZIP_NAME" \
-            "$ZIP_NAME.blockmap" \
-            "$DMG_NAME"; do
-            SIZE="$(gh release view "$VERSION" --json assets --jq ".assets[] | select(.name == \"$ASSET\") | .size")"
-            if [ -z "$SIZE" ] || [ "$SIZE" -le 0 ]; then
-              echo "::error::Missing or empty release asset: $ASSET"
-              exit 1
-            fi
-          done
+
           VERIFY_DIR="$RUNNER_TEMP/release-verify"
           rm -rf "$VERIFY_DIR"
           mkdir -p "$VERIFY_DIR"
-          gh release download "$VERSION" --pattern latest-mac.yml --dir "$VERIFY_DIR"
-          gh release download "$VERSION" --pattern "$ZIP_NAME" --dir "$VERIFY_DIR"
-          gh release download "$VERSION" --pattern "$DMG_NAME" --dir "$VERIFY_DIR"
+          for asset in latest-mac.yml "$ZIP_NAME" "$DMG_NAME"; do
+            ASSET_ID="$(jq -r --arg name "$asset" \
+              '[.assets[] | select(.name == $name) | .id][0] // empty' <<<"$RELEASE")"
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$ASSET_ID" > "$VERIFY_DIR/$asset"
+          done
+
           VERIFY_DIR="$VERIFY_DIR" RAW="$RAW" ZIP_NAME="$ZIP_NAME" DMG_NAME="$DMG_NAME" node <<'NODE'
           const crypto = require("node:crypto");
           const fs = require("node:fs");
@@ -273,6 +267,14 @@ jobs:
           const fail = (message) => {
             throw new Error(`Invalid latest-mac.yml: ${message}`);
           };
+          const hashFile = (filePath) =>
+            new Promise((resolve, reject) => {
+              const hash = crypto.createHash("sha512");
+              const stream = fs.createReadStream(filePath);
+              stream.on("data", (chunk) => hash.update(chunk));
+              stream.on("error", reject);
+              stream.on("end", () => resolve(hash.digest("base64")));
+            });
 
           const verify = async () => {
             const directory = process.env.VERIFY_DIR;
@@ -285,9 +287,7 @@ jobs:
             if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
               fail("root must be a mapping");
             }
-            if (String(manifest.version) !== rawVersion) {
-              fail(`version must be ${rawVersion}`);
-            }
+            if (String(manifest.version) !== rawVersion) fail(`version must be ${rawVersion}`);
             if (manifest.path !== zipName) fail(`path must be ${zipName}`);
             if (!Array.isArray(manifest.files) || manifest.files.length !== 2) {
               fail("files must contain exactly the updater ZIP and DMG");
@@ -315,13 +315,7 @@ jobs:
               if (!Number.isSafeInteger(file.size) || file.size !== size) {
                 fail(`${artifactName} size does not match the uploaded asset (${size})`);
               }
-              const digest = await new Promise((resolve, reject) => {
-                const hash = crypto.createHash("sha512");
-                const stream = fs.createReadStream(artifactPath);
-                stream.on("data", (chunk) => hash.update(chunk));
-                stream.on("error", reject);
-                stream.on("end", () => resolve(hash.digest("base64")));
-              });
+              const digest = await hashFile(artifactPath);
               if (file.sha512 !== digest) {
                 fail(`${artifactName} sha512 does not match the uploaded asset`);
               }
@@ -337,4 +331,12 @@ jobs:
             process.exitCode = 1;
           });
           NODE
-          gh release edit "$VERSION" --draft=false --latest
+
+          FINAL_RELEASE="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID")"
+          if [ "$(jq -r '.tag_name' <<<"$FINAL_RELEASE")" != "$VERSION" ] || \
+             [ "$(jq -r '.draft' <<<"$FINAL_RELEASE")" != "true" ]; then
+            echo "::error::Release changed before publication"
+            exit 1
+          fi
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -f make_latest=true >/dev/null

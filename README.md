@@ -153,10 +153,11 @@ public/assets/builtin/      # 内置默认素材（麦克风 / 设备 / 背景 /
 
 macOS DMG（Apple Silicon）通过 electron-builder 产出，配置见 [`electron-builder.yml`](electron-builder.yml)：
 
-- UI 远程加载，桌面包体仅含 Electron 主/预载 bundle + `@remotion/renderer` 及其原生 compositor，`chrome-headless-shell` 随 `extraResources` 一并附带。
-- 桌面更新在后台下载；下载完成后会等待当前导出完成，并由用户保存或明确放弃产物，再强制要求重启安装，不提供“稍后”入口。线上 UI 仅在对应签名版本已发布后，才会阻断能力过旧的客户端。
-- 签名使用 *Developer ID Application* 证书，开启 Hardened Runtime；生产凭据保存在 GitHub Actions Secrets。
-- 公证与 staple 统一由 `build/notarize.cjs` 完成；缺少 Apple 凭据时仅允许本地签名构建。
+- UI 远程加载；桌面包携带 Electron 主/预载 bundle、`@remotion/renderer`、原生 compositor 与 Littlestart CLI runtime，`chrome-headless-shell` 和 CLI 均通过 `extraResources` 放在 `app.asar` 外。
+- 桌面更新会在后台下载，顶栏持续显示真实状态且不影响编辑与导出；下载完成后由用户选择合适时机重启。导出期间会保留已下载的安装包并暂时禁用重启，正常退出应用时也会自动完成安装。`v0.2.2` 可显示只读下载/错误状态，但不会暴露不安全的“立即重启”；`v0.2.1` 的旧壳会在下载后出现一次无法延后的重启提示，新版 Web 会提前说明这个迁移例外。
+- 客户端发行只接受已合入 `main` 的 `v*` tag。CI 会先预建唯一草稿 Release，再把 DMG、自动更新 ZIP、blockmap 和 manifest 上传到同一草稿，逐项核验后才公开；线上 UI 也只在 manifest、ZIP 和手动安装包都可用时展示更新。
+- 签名使用 *Developer ID Application* 证书并开启 Hardened Runtime；生产凭据保存在 GitHub Actions Secrets。
+- 公证与 staple 统一由 `build/notarize.cjs` 完成；缺少 Apple 凭据时只允许本地签名构建。
 
 ```bash
 npm run electron:build

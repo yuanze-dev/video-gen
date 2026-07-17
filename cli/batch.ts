@@ -9,6 +9,7 @@ import type {
   ExportQuality,
   ExportResolution,
 } from "../lib/export-options";
+import { withFileLock } from "./cache";
 
 const MAX_BATCH_JOBS = 10_000;
 const DEFAULT_CONCURRENCY = 1;
@@ -19,7 +20,6 @@ export const BATCH_LOCK_STALE_MS = 5 * 60 * 1000;
 const BATCH_LOCK_RECOVERY_FILENAME = ".littlestart-batch.lock.recovery";
 const BATCH_LOCK_POLL_MS = 100;
 const JOURNAL_VERSION = 1 as const;
-const LOCK_VERSION = 1 as const;
 
 const BatchExportOptionsSchema = z
   .object({
@@ -413,183 +413,8 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError(signal);
 }
 
-type BatchLockMetadata = {
-  version: typeof LOCK_VERSION;
-  pid: number;
-  token: string;
-  createdAt: string;
-};
-
-type BatchLockHandle = {
-  file: fs.FileHandle;
-  path: string;
-  token: string;
-};
-
-const BatchLockMetadataSchema = z
-  .object({
-    version: z.literal(LOCK_VERSION),
-    pid: z.number().int().positive(),
-    token: z.string().regex(/^[a-f0-9]{32}$/),
-    createdAt: z.string().datetime(),
-  })
-  .strict();
-
-async function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(done, milliseconds);
-    const onAbort = () => done(abortError(signal));
-    function done(error?: Error): void {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      if (error) reject(error);
-      else resolve();
-    }
-    signal?.addEventListener("abort", onAbort, { once: true });
-    // Close the race where abort happens after the initial check but before
-    // the listener is installed.
-    if (signal?.aborted) onAbort();
-  });
-}
-
 function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
-}
-
-function isAlreadyExists(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | undefined)?.code === "EEXIST";
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-async function readLockMetadata(
-  lockPath: string,
-): Promise<{ metadata?: BatchLockMetadata; modifiedAt: number } | null> {
-  try {
-    const [text, stat] = await Promise.all([
-      fs.readFile(lockPath, "utf8"),
-      fs.stat(lockPath),
-    ]);
-    const parsed = BatchLockMetadataSchema.safeParse(JSON.parse(text) as unknown);
-    return {
-      ...(parsed.success ? { metadata: parsed.data } : {}),
-      modifiedAt: stat.mtimeMs,
-    };
-  } catch (error) {
-    if (isMissing(error)) return null;
-    // A newly-created owner may still be writing metadata. Treat unreadable or
-    // partial contents as fresh unless the filesystem timestamp proves stale.
-    const stat = await fs.stat(lockPath).catch(() => null);
-    return stat ? { modifiedAt: stat.mtimeMs } : null;
-  }
-}
-
-async function clearStaleRecoveryBarrier(recoveryPath: string): Promise<boolean> {
-  const stat = await fs.lstat(recoveryPath).catch((error) => {
-    if (isMissing(error)) return null;
-    throw error;
-  });
-  if (!stat) return false;
-  if (Date.now() - stat.mtimeMs < BATCH_LOCK_STALE_MS) return true;
-  try {
-    if (stat.isDirectory() && !stat.isSymbolicLink()) await fs.rmdir(recoveryPath);
-    else await fs.unlink(recoveryPath);
-    return false;
-  } catch (error) {
-    if (isMissing(error)) return false;
-    return true;
-  }
-}
-
-/**
- * Serializes stale-lock removal. Every cooperative acquirer observes this
- * barrier before creating the main lock, preventing one waiter from deleting
- * a fresh lock while another waiter is recovering a crashed owner.
- */
-async function tryRecoverBatchLock(
-  lockPath: string,
-  recoveryPath: string,
-): Promise<boolean> {
-  try {
-    await fs.mkdir(recoveryPath);
-  } catch (error) {
-    if (isAlreadyExists(error)) return false;
-    throw error;
-  }
-
-  try {
-    const current = await readLockMetadata(lockPath);
-    if (!current) return true;
-    const stale = current.metadata
-      ? !processIsAlive(current.metadata.pid)
-      : Date.now() - current.modifiedAt >= BATCH_LOCK_STALE_MS;
-    if (!stale) return false;
-    await fs.unlink(lockPath).catch((error) => {
-      if (!isMissing(error)) throw error;
-    });
-    return true;
-  } finally {
-    await fs.rmdir(recoveryPath).catch(() => {});
-  }
-}
-
-async function acquireBatchLock(outDir: string, signal?: AbortSignal): Promise<BatchLockHandle> {
-  const lockPath = path.join(outDir, BATCH_LOCK_FILENAME);
-  const recoveryPath = path.join(outDir, BATCH_LOCK_RECOVERY_FILENAME);
-  for (;;) {
-    throwIfAborted(signal);
-    if (await clearStaleRecoveryBarrier(recoveryPath)) {
-      await abortableDelay(BATCH_LOCK_POLL_MS, signal);
-      continue;
-    }
-
-    let file: fs.FileHandle;
-    try {
-      file = await fs.open(lockPath, "wx", 0o600);
-    } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
-      const recovered = await tryRecoverBatchLock(lockPath, recoveryPath);
-      if (!recovered) await abortableDelay(BATCH_LOCK_POLL_MS, signal);
-      continue;
-    }
-
-    const token = crypto.randomBytes(16).toString("hex");
-    const metadata: BatchLockMetadata = {
-      version: LOCK_VERSION,
-      pid: process.pid,
-      token,
-      createdAt: new Date().toISOString(),
-    };
-    try {
-      await file.writeFile(`${JSON.stringify(metadata)}\n`, "utf8");
-      await file.sync();
-      return { file, path: lockPath, token };
-    } catch (error) {
-      await file.close().catch(() => {});
-      await fs.unlink(lockPath).catch(() => {});
-      throw error;
-    }
-  }
-}
-
-async function releaseBatchLock(lock: BatchLockHandle): Promise<void> {
-  await lock.file.close().catch(() => {});
-  const current = await readLockMetadata(lock.path);
-  if (current?.metadata?.token !== lock.token) return;
-  await fs.unlink(lock.path).catch((error) => {
-    if (!isMissing(error)) throw error;
-  });
 }
 
 function iso(now: () => Date): string {
@@ -1567,10 +1392,24 @@ export async function runBatch<TValidated, TResult = unknown>(
   throwIfAborted(options.signal);
   const outDir = path.resolve(options.outDir);
   await fs.mkdir(outDir, { recursive: true });
-  const lock = await acquireBatchLock(outDir, options.signal);
+  const lockPath = path.join(outDir, BATCH_LOCK_FILENAME);
   try {
-    return await runBatchWithLockHeld(options);
-  } finally {
-    await releaseBatchLock(lock);
+    return await withFileLock(lockPath, () => runBatchWithLockHeld(options), {
+      signal: options.signal,
+      staleMs: BATCH_LOCK_STALE_MS,
+      retryMinMs: BATCH_LOCK_POLL_MS,
+      retryMaxMs: BATCH_LOCK_POLL_MS,
+      // Batch runs intentionally wait until the current owner finishes unless
+      // the caller cancels. Preserve that contract while using the shared,
+      // inode-verified recovery and release primitive.
+      timeoutMs: Number.POSITIVE_INFINITY,
+    });
+  } catch (error) {
+    // The shared lock reports cancellation generically. Keep the batch API's
+    // caller-provided abort reason and error shape stable.
+    if (options.signal?.aborted && isAbortError(error)) {
+      throw abortError(options.signal);
+    }
+    throw error;
   }
 }

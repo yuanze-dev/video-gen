@@ -744,6 +744,12 @@ test("dead-owner and old malformed batch locks recover without leaving lock debr
         await pathExists(path.join(outDir, ".littlestart-batch.lock.recovery")),
         false,
       );
+      assert.deepEqual(
+        (await fs.readdir(outDir)).filter((name) =>
+          name.startsWith(`${core.BATCH_LOCK_FILENAME}.`),
+        ),
+        [],
+      );
     };
 
     const deadOwnerOutDir = path.join(dir, "dead-owner");
