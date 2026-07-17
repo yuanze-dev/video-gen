@@ -37,6 +37,51 @@ function requirePattern(value, pattern, label) {
   if (!pattern.test(value)) throw new Error(`文档契约缺失: ${label}`);
 }
 
+async function validateRightsInventory(value) {
+  const rows = [...value.matchAll(/^\| `([^`]+)` \| `([a-f0-9]{64})` \| ([^|]+) \| `([^`]+)` \|$/gm)];
+  if (rows.length === 0) throw new Error("内置素材权利清单没有素材行");
+
+  const names = rows.map((match) => match[1]);
+  if (new Set(names).size !== names.length) throw new Error("内置素材权利清单包含重复文件");
+
+  const assetsDirectory = path.join(root, "public", "assets", "builtin");
+  const assetEntries = await fs.readdir(assetsDirectory, { withFileTypes: true });
+  if (assetEntries.some((entry) => !entry.isFile())) {
+    throw new Error("内置素材目录只能包含普通文件");
+  }
+  const actualNames = assetEntries.map((entry) => entry.name).sort();
+  const expectedNames = [...names].sort();
+  if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+    throw new Error(
+      `内置素材权利清单与实际文件不一致: expected=${expectedNames.join(",")} actual=${actualNames.join(",")}`,
+    );
+  }
+
+  for (const row of rows) {
+    const bytes = await fs.readFile(path.join(assetsDirectory, row[1]));
+    const actualDigest = digest(bytes);
+    if (actualDigest !== row[2]) {
+      throw new Error(`内置素材摘要与权利清单不一致: ${row[1]}`);
+    }
+  }
+
+  const statuses = rows.map((match) => match[4]);
+  const unknown = statuses.filter(
+    (status) => status !== "REQUIRES_CONFIRMATION" && !/^APPROVED — \S.+$/.test(status),
+  );
+  if (unknown.length > 0) {
+    throw new Error(`内置素材权利清单包含未知审批状态: ${unknown.join(", ")}`);
+  }
+
+  const hasPending = statuses.includes("REQUIRES_CONFIRMATION");
+  if (hasPending && !/Release status: BLOCKED/.test(value)) {
+    throw new Error("内置素材存在待确认项时，发行状态必须为 BLOCKED");
+  }
+  if (!hasPending && !/Release status: APPROVED/.test(value)) {
+    throw new Error("内置素材全部获批后，发行状态必须为 APPROVED");
+  }
+}
+
 const canonicalFiles = await filesIn(roots[0]);
 if (!canonicalFiles.includes("SKILL.md")) throw new Error("canonical Skill 缺少 SKILL.md");
 for (const directory of roots.slice(1)) {
@@ -103,7 +148,7 @@ requirePattern(readmeText, /doctor[\s\S]*Chromium[\s\S]*WebGL/, "doctor 主动�
 requirePattern(readmeText, /LITTLESTART_CHROMIUM_GL=swangle/, "README 记录容器 swangle 配置");
 requirePattern(automationText, /--quality[\s\S]*--resolution[\s\S]*--fps/, "自动化文档要求导出规格一致");
 requirePattern(automationText, /doctor --fix --cache-dir[\s\S]*--offline/, "离线流水线复用同一缓存");
-requirePattern(rightsText, /Release status: BLOCKED[\s\S]*REQUIRES_CONFIRMATION/, "内置素材权利门禁");
+await validateRightsInventory(rightsText);
 requirePattern(noticesText, /Mediabunny 1\.47\.0[\s\S]*Mozilla Public License 2\.0/, "Mediabunny MPL-2.0 通知");
 requirePattern(noticesText, /not a complete SBOM/, "第三方清单不冒充完整 SBOM");
 
