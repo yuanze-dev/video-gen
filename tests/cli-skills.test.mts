@@ -250,3 +250,144 @@ test("failed forced restore preserves the old skill backup and reports its recov
     assert.equal(await fs.lstat(target).catch(() => null), null);
   });
 });
+
+test("managed user install marks both agents and rolls an upgrade back to the exact prior content", async () => {
+  await withTempDir(async (dir) => {
+    const source = path.join(dir, "source");
+    const home = path.join(dir, "home");
+    await createSkill(source, "v1");
+    await fs.mkdir(home);
+
+    const first = await subject.beginManagedGenerateVideoSkillInstall({
+      sourceDir: source,
+      homeDir: home,
+      target: "both",
+    });
+    assert.equal(await first.verify(), true);
+    assert.equal((await first.commit()).ok, true);
+
+    const targets = [
+      path.join(home, ".codex", "skills", "generate-video"),
+      path.join(home, ".claude", "skills", "generate-video"),
+    ];
+    for (const target of targets) {
+      assert.match(await fs.readFile(path.join(target, "SKILL.md"), "utf8"), /# v1/);
+      assert.match(
+        await fs.readFile(path.join(target, subject.MANAGED_SKILL_MARKER), "utf8"),
+        /littlestart-electron/,
+      );
+    }
+
+    await createSkill(source, "v2");
+    const upgrading = await subject.beginManagedGenerateVideoSkillInstall({
+      sourceDir: source,
+      homeDir: home,
+      target: "both",
+    });
+    assert.equal(await upgrading.verify(), true);
+    for (const target of targets) {
+      assert.match(await fs.readFile(path.join(target, "SKILL.md"), "utf8"), /# v2/);
+    }
+    const rollback = await upgrading.rollback();
+    assert.equal(rollback.ok, true);
+    assert.deepEqual(rollback.retainedPaths, []);
+    for (const target of targets) {
+      assert.match(await fs.readFile(path.join(target, "SKILL.md"), "utf8"), /# v1/);
+      assert.doesNotMatch(await fs.readFile(path.join(target, "SKILL.md"), "utf8"), /# v2/);
+    }
+  });
+});
+
+test("managed user install preserves an unmanaged conflict and does not partially install the other agent", async () => {
+  await withTempDir(async (dir) => {
+    const source = path.join(dir, "source");
+    const home = path.join(dir, "home");
+    const codex = path.join(home, ".codex", "skills", "generate-video");
+    const claude = path.join(home, ".claude", "skills", "generate-video");
+    await createSkill(source, "v1");
+    await fs.mkdir(codex, { recursive: true });
+    await fs.writeFile(path.join(codex, "SKILL.md"), "# user-owned\n");
+
+    await assert.rejects(
+      subject.beginManagedGenerateVideoSkillInstall({
+        sourceDir: source,
+        homeDir: home,
+        target: "both",
+      }),
+      (error: unknown) =>
+        error instanceof subject.ManagedSkillInstallError &&
+        error.code === "SKILL_INSTALL_CONFLICT",
+    );
+    assert.equal(await fs.readFile(path.join(codex, "SKILL.md"), "utf8"), "# user-owned\n");
+    assert.equal(await fs.lstat(claude).catch(() => null), null);
+  });
+});
+
+test("managed user install rolls back both targets when the second target publish fails", async () => {
+  await withTempDir(async (dir) => {
+    const source = path.join(dir, "source");
+    const home = path.join(dir, "home");
+    await createSkill(source, "v1");
+    await fs.mkdir(home);
+
+    await assert.rejects(
+      subject.beginManagedGenerateVideoSkillInstall({
+        sourceDir: source,
+        homeDir: home,
+        target: "both",
+        testHooks: {
+          afterTargetPublish: async (target) => {
+            if (target.agent === "claude") throw new Error("simulated second-target failure");
+          },
+        },
+      }),
+      (error: unknown) =>
+        error instanceof subject.ManagedSkillInstallError &&
+        error.code === "SKILL_INSTALL_FAILED",
+    );
+    for (const target of [
+      path.join(home, ".codex", "skills", "generate-video"),
+      path.join(home, ".claude", "skills", "generate-video"),
+    ]) {
+      assert.equal(await fs.lstat(target).catch(() => null), null);
+    }
+  });
+});
+
+test("managed user install rejects a symlinked agent directory without writing outside home", async (t) => {
+  if (process.platform === "win32") {
+    t.skip("symlink creation is permission-dependent on Windows");
+    return;
+  }
+  await withTempDir(async (dir) => {
+    const source = path.join(dir, "source");
+    const home = path.join(dir, "home");
+    const outside = path.join(dir, "outside");
+    await createSkill(source, "v1");
+    await fs.mkdir(home);
+    await fs.mkdir(outside);
+    await fs.symlink(outside, path.join(home, ".codex"));
+
+    const inspection = await subject.inspectManagedGenerateVideoSkill({
+      sourceDir: source,
+      homeDir: home,
+      target: "both",
+    });
+    assert.equal(inspection.status, "conflict");
+    assert.equal(
+      inspection.targets.find((target) => target.agent === "codex")?.reason,
+      "unsafe",
+    );
+    await assert.rejects(
+      subject.beginManagedGenerateVideoSkillInstall({
+        sourceDir: source,
+        homeDir: home,
+        target: "both",
+      }),
+      (error: unknown) =>
+        error instanceof subject.ManagedSkillInstallError &&
+        error.code === "SKILL_INSTALL_CONFLICT",
+    );
+    assert.deepEqual(await fs.readdir(outside), []);
+  });
+});

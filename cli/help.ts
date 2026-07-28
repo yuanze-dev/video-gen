@@ -17,9 +17,22 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   resume: "--resume              使用内容摘要安全断点续跑",
   target: "--target <目标>       codex | claude | both",
   scope: "--scope <范围>        project | user",
+  prompt: "--prompt <描述>       音效或音乐描述（默认音效 1-450；music 1-4100 字符）",
+  duration: "--duration <秒>      music: 3-600；sound-effect: 0.5-5（默认 5）",
+  volume: "--volume <音量>       写入配置补丁的建议音量（0-1，默认 0.25）",
+  provider: "--provider <服务>    elevenlabs（当前唯一 Provider）",
+  "audio-kind": "--audio-kind <类型>  sound-effect | music（默认 sound-effect）",
+  model: "--model <模型>        music_v2 | music_v1",
+  manifest: "--manifest <路径>   指定生成旁路 manifest 路径",
+  bgm: "--bgm <策略>           auto | off | required（默认 auto）",
+  "bgm-prompt": "--bgm-prompt <方向>  补充音乐或环境音方向；CLI 自动加入旁白安全约束",
+  "replace-bgm": "--replace-bgm         明确替换已有 BGM；无缓存且缺 Key/离线时失败",
+  "allow-custom-structure": "--allow-custom-structure  仅在用户明确要求时，允许自定义标准 3-2-1 幕帘或官方片尾",
+  "prepared-config": "--prepared-config <路径>  持久化已接入 BGM 的配置",
+  lock: "--lock <路径>          持久化可重现渲染锁",
 };
 
-const GROUPS = ["config", "templates", "assets", "cache", "skill"] as const;
+const GROUPS = ["audio", "config", "templates", "assets", "cache", "skill"] as const;
 
 function commandLines(): string[] {
   return CLI_COMMAND_SPECS.filter((spec) => spec.id !== "help").map(
@@ -52,7 +65,7 @@ function topHelp(): string {
     "  littlestart init video.json --minimal",
     "  littlestart validate video.json",
     "  littlestart still video.json --scene all --out-dir preview",
-    "  littlestart render video.json --out output/video.mp4",
+    "  littlestart produce video.json --out output/video.mp4",
     "",
     "运行 `littlestart help <命令>` 查看命令详情。",
   ].join("\n");

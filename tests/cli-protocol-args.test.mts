@@ -45,9 +45,12 @@ test("covers every planned top-level and grouped command", () => {
     [["init"], "init", ["init"]],
     [["validate", "video.json"], "validate", ["validate"]],
     [["plan", "video.json"], "plan", ["plan"]],
+    [["produce", "video.json"], "produce", ["produce"]],
     [["render", "video.json"], "render", ["render"]],
     [["still", "video.json"], "still", ["still"]],
     [["probe", "clip.mp4"], "probe", ["probe"]],
+    [["audio", "plan", "video.json", "--prompt", "quiet room ambience"], "audio.plan", ["audio", "plan"]],
+    [["audio", "generate", "video.json", "--prompt", "quiet room ambience"], "audio.generate", ["audio", "generate"]],
     [["config", "schema"], "config.schema", ["config", "schema"]],
     [["config", "resolve", "video.json"], "config.resolve", ["config", "resolve"]],
     [["config", "lock", "video.json"], "config.lock", ["config", "lock"]],
@@ -190,6 +193,98 @@ test("validates enum and bounded integer option values", () => {
     parse(["plan", "video.json", "--resolution", "720p", "--fps", "30"]).options,
     { resolution: "720p", fps: 30 },
   );
+});
+
+test("audio options are strict, bounded, and default-safe", () => {
+  const invocation = parse([
+    "audio",
+    "generate",
+    "video.json",
+    "--prompt",
+    "warm minimal instrumental",
+    "--duration",
+    "12.5",
+    "--volume",
+    "0.2",
+    "--provider",
+    "elevenlabs",
+    "--audio-kind",
+    "music",
+    "--model",
+    "music_v2",
+    "--out",
+    "assets/bgm.mp3",
+    "--manifest",
+    "assets/bgm.manifest.json",
+  ]);
+  assert.deepEqual(invocation.options, {
+    prompt: "warm minimal instrumental",
+    duration: 12.5,
+    volume: 0.2,
+    provider: "elevenlabs",
+    audioKind: "music",
+    model: "music_v2",
+    out: "assets/bgm.mp3",
+    manifest: "assets/bgm.manifest.json",
+  });
+
+  expectCliError(["audio", "plan", "video.json"], "MISSING_ARGUMENT");
+  assert.deepEqual(
+    parse(["audio", "plan", "video.json", "--prompt", "room tone", "--duration", "2.9"]).options,
+    { prompt: "room tone", duration: 2.9 },
+  );
+  expectCliError(["audio", "plan", "video.json", "--prompt", "x", "--duration", "0.4"], "INVALID_OPTION_VALUE");
+  expectCliError(["audio", "plan", "video.json", "--prompt", "x", "--duration", "5.1"], "INVALID_OPTION_VALUE");
+  expectCliError(["audio", "plan", "video.json", "--prompt", "x", "--audio-kind", "music", "--duration", "2.9"], "INVALID_OPTION_VALUE");
+  expectCliError(["audio", "plan", "video.json", "--prompt", "x", "--audio-kind", "music", "--duration", "601"], "INVALID_OPTION_VALUE");
+  expectCliError(["audio", "plan", "video.json", "--prompt", "x", "--volume", "-0.1"], "INVALID_OPTION_VALUE");
+  expectCliError(["audio", "plan", "video.json", "--prompt", "x", "--auth", "direct"], "UNKNOWN_OPTION");
+  expectCliError(["audio", "plan", "video.json", "--prompt", "x", "--force"], "OPTION_NOT_ALLOWED");
+  assert.deepEqual(
+    parse([
+      "audio", "plan", "video.json", "--prompt", "aircraft cabin ambience",
+      "--duration", "0.5",
+    ]).options,
+    { prompt: "aircraft cabin ambience", duration: 0.5 },
+  );
+  expectCliError(
+    ["audio", "plan", "video.json", "--prompt", "x", "--audio-kind", "sound-effect", "--duration", "5.1"],
+    "INVALID_OPTION_VALUE",
+  );
+  expectCliError(
+    ["audio", "plan", "video.json", "--prompt", "x", "--model", "music_v2"],
+    "OPTION_CONFLICT",
+  );
+
+  assert.deepEqual(
+    parse([
+      "produce",
+      "video.json",
+      "--bgm",
+      "required",
+      "--bgm-prompt",
+      "warm optimistic acoustic",
+      "--audio-kind",
+      "music",
+      "--replace-bgm",
+      "--allow-custom-structure",
+      "--prepared-config",
+      "output/prepared.json",
+      "--lock",
+      "output/video.lock.json",
+    ]).options,
+    {
+      bgm: "required",
+      bgmPrompt: "warm optimistic acoustic",
+      audioKind: "music",
+      replaceBgm: true,
+      allowCustomStructure: true,
+      preparedConfig: "output/prepared.json",
+      lock: "output/video.lock.json",
+    },
+  );
+  expectCliError(["produce", "video.json", "--bgm", "sometimes"], "INVALID_OPTION_VALUE");
+  expectCliError(["render", "video.json", "--allow-custom-structure"], "OPTION_NOT_ALLOWED");
 });
 
 test("enforces missing and excess positionals as well as required options", () => {

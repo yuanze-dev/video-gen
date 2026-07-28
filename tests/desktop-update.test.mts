@@ -581,8 +581,9 @@ test("update UI stays non-modal and only hands off focus after a user retry", ()
   assert.match(indicator, /data-update-indicator/);
   assert.match(
     main,
-    /DESKTOP_CLI_CHANNELS\.install[\s\S]+tryAcquireRestartBlocker[\s\S]+installer\.install/,
+    /const installCli[\s\S]+tryAcquireRestartBlocker[\s\S]+installer\.install/,
   );
+  assert.match(main, /DESKTOP_CLI_CHANNELS\.install[\s\S]+return installCli\(\)/);
   assert.match(main, /render:session-begin[\s\S]+beginExportWithUpdateInterlock/);
   assert.match(main, /render:start[\s\S]+startRenderWithUpdateInterlock/);
 

@@ -85,6 +85,10 @@
 
 错误类别会通过稳定的 `error.code` 进一步细分。新增错误 code 不一定提升协议主版本，因此消费者应按退出码提供保底分支。
 
+音频生成相关的环境错误包括 `AUTH_REQUIRED`、`MCP_RUNTIME_MISSING`、`MCP_RUNTIME_FAILED`、`MCP_TOOL_MISSING`、`MCP_PROTOCOL_ERROR`、`REMOTE_REQUEST_FAILED` 和 `REMOTE_RATE_LIMITED`。这些错误必须显式处理，不能为了继续而静默切换 Composio 或 REST。同 request key 的已验证音频会先复用；未命中时，`--bgm auto` 缺 Key 是成功信封中的 `BGM_GENERATION_SKIPPED` warning。`--bgm required` 会为空 BGM 或内置 fallback 生成，显式本地/upload BGM 需要 `--replace-bgm` 才替换；无可复用缓存且缺 Key 时返回 `AUTH_REQUIRED`。
+
+`PRODUCTION_GUARD_FAILED` 是配置类错误（退出码 `3`），并且早于凭据读取、付费请求和渲染。它表示标题/词稿仍为空或 init 占位文案，或标准 3-2-1 幕帘、开场音效、官方片尾及其音轨被移除、缩短或静音。自动化应修复最小配置；只有用户明确要求自定义片头/片尾时才能使用 `--allow-custom-structure`。
+
 ## 推荐调用模式
 
 短命令：
@@ -99,19 +103,40 @@ fi
 长命令：
 
 ```bash
-littlestart render video.json \
+littlestart produce video.json \
+  --bgm auto \
   --out output/video.mp4 \
   --events ndjson \
-  > render.events.ndjson
+  > produce.events.ndjson
 status=$?
 test "$status" -eq 0
 ```
 
-生产流水线推荐顺序为 `doctor --offline` → `validate` → `plan` → 可选静帧审查 → `render`。先在联网准备阶段执行 `doctor --fix --cache-dir <dir>`，再把同一目录持久化给离线执行环境；离线 doctor 与后续 render/batch 都传相同的 `--cache-dir <dir> --offline`。不要在每次任务前清空缓存。
+生产流水线推荐顺序为 `doctor --offline` → `validate` → `plan` → 可选静帧审查 → `produce`。先在联网准备阶段执行 `doctor --fix --cache-dir <dir>`，再把同一目录持久化给执行环境；后续命令传相同的 `--cache-dir <dir>`。不要在每次任务前清空缓存。
+
+`produce` 是完整视频主入口：
+
+```bash
+littlestart produce video.json \
+  --bgm auto \
+  --prepared-config output/video.prepared.json \
+  --lock output/video.lock.json \
+  --out output/video.mp4 \
+  --events ndjson > produce.ndjson
+```
+
+- 源 JSON 只写用户改动；未明确要求改结构时不写 `opening.countdown`、`opening.curtain` 或 `ending`，并在 `init --minimal` 后替换标题/词稿占位文案。
+- CLI 从标题和文案推断空间与持续物理声源，不会把对白复制给音效模型；官方 MCP 生成/复用 MP3 后自动写 prepared config 和 lock，再渲染，调用方不做手工拼装。只在用户给出更具体的环境声方向时传 `--bgm-prompt`，且它必须描述声源，不是台词或剧情事件。
+- 整个项目默认 `--audio-kind sound-effect`，调用 `text_to_sound_effects` 只生成一次最多 5 秒的无缝素材并在正片循环；只有明确需要配乐时才显式传 `--audio-kind music` 调用 `compose_music`。
+- Key 只来自 `ELEVENLABS_API_KEY` 或 `~/.config/littlestart/secrets.env`，禁止进入 argv、配置、锁、manifest、日志和结果。
+- 付费请求前检查渲染环境、正式输出和音频冲突；同 request key 的已验证音频会复用。
+- `auto` 缺 Key 时 warning + fallback；`required` 对空/内置 BGM 要求生成，缺 Key 时零写入失败；显式本地/upload BGM 需要 `--replace-bgm` 才替换；`off` 保留现有 BGM。
+- `--offline` 不启动 MCP，但允许 `auto` 使用已有/内置 BGM 或静音继续。
+- 只接受唯一终态 result；必须断言 `productionGuard.policy="standard"`、`passed=true`，`scenes` 有 opening/content/ending，`media` 的 H.264/MP4、宽高、fps、总时长与 plan 一致，应有声音时有音轨。
 
 ## 导出计划与锁文件
 
-- 对未锁定的源配置选择了非默认规格时，必须给 `validate`、`plan` 和 `render` 传入完全相同的 `--quality`、`--resolution` 和 `--fps`；否则预检的不是最终产物。
+- 对未锁定的源配置选择了非默认规格时，必须给 `validate`、`plan` 和 `produce` 传入完全相同的 `--quality`、`--resolution` 和 `--fps`；否则预检的不是最终产物。
 - 稳定流水线应用 `config lock` 固化完整配置、模板语义摘要、本地素材摘要和导出三元组。`render` / `still` / `batch` 会拒绝用命令行或 manifest 覆盖锁文件中的导出规格。
 - `plan` 结果中的 `assets` 是已解析的本地文件素材，不是全部内置素材清单。审计内置引用时结合 `config resolve`、`assets list` 和 `assets inspect`。
 

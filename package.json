@@ -1,6 +1,6 @@
 {
   "name": "video-gen",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "小音符起号助手 — 提词器视频生成器（本机渲染桌面版）",
   "author": "原则科技 Yuanze",
@@ -9,10 +9,13 @@
     "dev": "next dev",
     "cli": "node scripts/cli.mjs",
     "build:cli": "node scripts/build-cli.mjs",
+    "build:mcp:elevenlabs": "node scripts/build-elevenlabs-mcp.mjs",
+    "verify:mcp:elevenlabs": "node scripts/build-elevenlabs-mcp.mjs --verify-only",
     "pack:cli": "node scripts/pack-cli.mjs",
     "smoke:cli": "node scripts/smoke-test-cli-package.mjs",
     "smoke:cli:render": "node scripts/smoke-test-cli-package.mjs --render",
     "test:cli": "node --no-warnings --experimental-strip-types --test tests/cli-*.test.mts tests/render-core.test.mts",
+    "test:mcp-packaging": "node --no-warnings --experimental-strip-types --test tests/mcp-packaging.test.mts tests/packaged-cli-production-gate.test.mts tests/encoded-production-gate.test.mts",
     "test:cli:repro": "node scripts/verify-cli-reproducibility.mjs",
     "test:skills": "node scripts/validate-cli-skills.mjs",
     "build:remotion-site": "node scripts/build-remotion-site.mjs",
@@ -25,7 +28,7 @@
     "typecheck:tests": "tsc -p tsconfig.tests.json",
     "build:electron": "node scripts/build-electron.mjs",
     "electron:dev": "npm run build:electron && electron .",
-    "electron:build": "npm run build:remotion-site && npm run build:cli && npm run build:electron && electron-builder --mac"
+    "electron:build": "npm run build:remotion-site && npm run build:cli && npm run build:mcp:elevenlabs && npm run build:electron && LITTLESTART_REQUIRE_ELEVENLABS_MCP=true electron-builder --mac"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
@@ -41,7 +44,7 @@
     "clsx": "^2.1.1",
     "electron-updater": "^6.8.9",
     "lucide-react": "^1.21.0",
-    "next": "16.2.9",
+    "next": "16.2.12",
     "next-themes": "^0.4.6",
     "react": "19.2.4",
     "react-dom": "19.2.4",
@@ -63,9 +66,15 @@
     "electron-builder": "^26.15.3",
     "esbuild": "^0.28.1",
     "eslint": "^9",
-    "eslint-config-next": "16.2.9",
-    "js-yaml": "^4.2.0",
+    "eslint-config-next": "16.2.12",
+    "js-yaml": "4.3.0",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.24",
+      "sharp": "0.35.3"
+    }
   }
 }

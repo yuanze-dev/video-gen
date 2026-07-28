@@ -20,6 +20,28 @@ import {
   type ParsedCliInvocation,
 } from "./args";
 import {
+  DEFAULT_AUDIO_KIND,
+  DEFAULT_AUDIO_MODEL,
+  DEFAULT_SOUND_EFFECT_DURATION_SEC,
+  MAX_SOUND_EFFECT_DURATION_SEC,
+  MIN_SOUND_EFFECT_DURATION_SEC,
+  SOUND_EFFECT_OUTPUT_FORMAT,
+  createAudioGenerationPlan,
+  generatePlannedAudio,
+  MAX_GENERATED_AUDIO_BYTES,
+} from "./audio";
+import {
+  ELEVENLABS_MCP_PACKAGE,
+  ELEVENLABS_MCP_MUSIC_TOOL,
+  ELEVENLABS_MCP_SOUND_EFFECT_TOOL,
+  ELEVENLABS_MCP_VERSION,
+} from "./elevenlabs-mcp";
+import {
+  resolveElevenLabsCredential,
+  resolveLittlestartEnvFile,
+  type ElevenLabsCredential,
+} from "./local-secrets";
+import {
   CLI_MIME_BY_EXTENSION,
   inspectCliAsset,
   isCliConfigValidationError,
@@ -71,6 +93,12 @@ import {
   resolveCliRuntime,
   type CliRuntime,
 } from "./runtime";
+import {
+  assertStandardProductionStructure,
+  createProductionAudioPlan,
+  isGeneratedCandidate,
+  prepareVideoProduction,
+} from "./produce";
 import { installGenerateVideoSkill } from "./skills";
 import {
   ASSET_SLOT_REGISTRY,
@@ -207,11 +235,25 @@ function assertExtension(file: string, extensions: readonly string[], label: str
   }
 }
 
+function portablePathFrom(baseDir: string, target: string): string {
+  const relative = path.relative(path.resolve(baseDir), path.resolve(target));
+  if (path.isAbsolute(relative)) return path.resolve(target);
+  return relative.split(path.sep).join("/") || path.basename(target);
+}
+
 async function assertOutputsAvailable(
   files: readonly string[],
   overwrite: boolean,
 ): Promise<void> {
+  const seen = new Set<string>();
   for (const file of files) {
+    const target = path.resolve(file);
+    if (seen.has(target)) {
+      throw new CliError("OPTION_CONFLICT", `多个输出不能写入同一路径: ${target}`, {
+        hint: "为视频、封面、prepared config 与 lock 分别指定不同路径。",
+      });
+    }
+    seen.add(target);
     const existing = await fs.lstat(file).then(
       (stat) => stat,
       (error: NodeJS.ErrnoException) => {
@@ -386,6 +428,62 @@ async function dispatch(context: CommandContext): Promise<CommandResult> {
           offlineLocalRender: true,
           remoteAssets: false,
           cloudRender: false,
+          audioGeneration: {
+            remote: true,
+            offlinePlan: true,
+            providers: [
+              {
+                id: "elevenlabs",
+                kinds: [
+                  {
+                    id: "sound-effect",
+                    tool: ELEVENLABS_MCP_SOUND_EFFECT_TOOL,
+                    models: [],
+                    defaultDurationSec: DEFAULT_SOUND_EFFECT_DURATION_SEC,
+                    durationSec: {
+                      min: MIN_SOUND_EFFECT_DURATION_SEC,
+                      max: MAX_SOUND_EFFECT_DURATION_SEC,
+                    },
+                    loop: true,
+                    outputFormat: SOUND_EFFECT_OUTPUT_FORMAT,
+                  },
+                  {
+                    id: "music",
+                    tool: ELEVENLABS_MCP_MUSIC_TOOL,
+                    models: ["music_v2", "music_v1"],
+                    defaultModel: DEFAULT_AUDIO_MODEL,
+                    durationSec: { min: 3, max: 600 },
+                    forceInstrumental: true,
+                  },
+                ],
+                defaultKind: DEFAULT_AUDIO_KIND,
+                models: [],
+                defaultModel: null,
+                defaultDurationSec: DEFAULT_SOUND_EFFECT_DURATION_SEC,
+                durationSec: {
+                  min: MIN_SOUND_EFFECT_DURATION_SEC,
+                  max: MAX_SOUND_EFFECT_DURATION_SEC,
+                },
+                forceInstrumental: false,
+                outputContainer: "mp3",
+                maxOutputBytes: MAX_GENERATED_AUDIO_BYTES,
+                auth: {
+                  default: "mcp",
+                  modes: ["mcp"],
+                  environment: ["ELEVENLABS_API_KEY"],
+                  localEnvFile: resolveLittlestartEnvFile(),
+                  secretsInConfig: false,
+                },
+                mcp: {
+                  transport: "stdio",
+                  package: ELEVENLABS_MCP_PACKAGE,
+                  version: ELEVENLABS_MCP_VERSION,
+                  tool: ELEVENLABS_MCP_SOUND_EFFECT_TOOL,
+                  tools: [ELEVENLABS_MCP_SOUND_EFFECT_TOOL, ELEVENLABS_MCP_MUSIC_TOOL],
+                },
+              },
+            ],
+          },
           templates: [templateDetails(runtime)],
           export: {
             containers: ["mp4"],
@@ -435,6 +533,193 @@ async function dispatch(context: CommandContext): Promise<CommandResult> {
       return invocation.id === "validate"
         ? { result, message: `配置有效 · ${plan.timeline.total.seconds.toFixed(2)} 秒 · ${plan.output.width}×${plan.output.height} @ ${plan.output.fps}fps` }
         : { result };
+    }
+    case "produce": {
+      const source = invocation.positionals[0];
+      const input = await loadInput(context, source);
+      if (input.lock) {
+        throw new CliError("OPTION_CONFLICT", "produce 只能接收源配置，不能接收渲染锁");
+      }
+      assertStandardProductionStructure(
+        input.config,
+        invocation.options.allowCustomStructure === true,
+      );
+      const runtime = await context.getRuntime();
+      const options = exportOptionsFor(invocation);
+      const runId = timestamp();
+      const outPath = path.resolve(
+        invocation.options.out ?? path.join("output", `video-${runId}.mp4`),
+      );
+      const coverPath = invocation.options.cover ? path.resolve(invocation.options.cover) : undefined;
+      const preparedConfigPath = path.resolve(
+        invocation.options.preparedConfig ?? path.join("output", `video-${runId}.prepared.json`),
+      );
+      const lockPath = path.resolve(
+        invocation.options.lock ?? path.join("output", `video-${runId}.lock.json`),
+      );
+      assertExtension(outPath, [".mp4"], "options.out");
+      assertExtension(preparedConfigPath, [".json"], "options.preparedConfig");
+      assertExtension(lockPath, [".json"], "options.lock");
+      if (coverPath) assertExtension(coverPath, [".jpg", ".jpeg"], "options.cover");
+      await assertOutputsAvailable(
+        [outPath, preparedConfigPath, lockPath, ...(coverPath ? [coverPath] : [])],
+        invocation.options.force === true,
+      );
+      const bgmMode = invocation.options.bgm ?? "auto";
+      const generationCandidate = isGeneratedCandidate(
+        input.config,
+        bgmMode,
+        invocation.options.replaceBgm === true,
+      );
+      const generationRequired =
+        generationCandidate &&
+        (bgmMode === "required" || invocation.options.replaceBgm === true);
+      // A verified request-key cache is a local artifact: consult it before
+      // touching the secrets file or treating --offline as a hard stop.  The
+      // helper takes the same per-output lock as generation, so this cannot
+      // race a concurrent paid request into a second call.
+      let cachedAudioAvailable = false;
+      if (generationCandidate) {
+        const plannedAudio = createProductionAudioPlan({
+          input,
+          mode: bgmMode,
+          replaceBgm: invocation.options.replaceBgm,
+          durationSec: invocation.options.duration,
+          volume: invocation.options.volume,
+          audioKind: invocation.options.audioKind,
+          model: invocation.options.model,
+          prompt: invocation.options.bgmPrompt,
+        });
+        if (!plannedAudio) {
+          throw new CliError("INTERNAL_ERROR", "BGM 缓存预检未能构建生成计划");
+        }
+        try {
+          await generatePlannedAudio({
+            plan: plannedAudio.plan,
+            configBaseDir: path.dirname(preparedConfigPath),
+            remoteAllowed: false,
+            remoteDisabledError: invocation.global.offline
+              ? "OFFLINE_RESOURCE_MISSING"
+              : "AUTH_REQUIRED",
+            signal,
+          });
+          cachedAudioAvailable = true;
+        } catch (error) {
+          if (!isCliError(error) || !["AUTH_REQUIRED", "OFFLINE_RESOURCE_MISSING"].includes(error.code)) {
+            throw error;
+          }
+        }
+      }
+      let credential: ElevenLabsCredential = {
+        apiKey: null,
+        configured: false,
+        source: "missing",
+        envFile: resolveLittlestartEnvFile(),
+      };
+      if (generationCandidate && !cachedAudioAvailable && !invocation.global.offline) {
+        try {
+          credential = await resolveElevenLabsCredential();
+        } catch (error) {
+          if (generationRequired) {
+            throw new CliError("AUTH_REQUIRED", "BGM 生成已被明确请求，但本机 Key 配置不可读", {
+              hint: `在 Electron 客户端重新配置 Key，或修复 ${credential.envFile} 后重试。`,
+              cause: error,
+            });
+          }
+          // Optional auto mode treats an unreadable credential as unavailable;
+          // prepareVideoProduction emits the normal fallback warning.
+        }
+      }
+      if (generationRequired && !cachedAudioAvailable && invocation.global.offline) {
+        throw new CliError("OFFLINE_RESOURCE_MISSING", "--offline 下无法生成请求的 BGM", {
+          hint: "先联网完成 produce，之后可使用 prepared config 或 lock 离线渲染。",
+        });
+      }
+      if (generationRequired && !cachedAudioAvailable && !credential.apiKey) {
+        throw new CliError("AUTH_REQUIRED", "BGM 生成已被明确请求，但未配置 ElevenLabs API Key", {
+          hint: `在 Electron 客户端配置 Key，或填写 ${credential.envFile} 后重试。`,
+        });
+      }
+      // Validate the local renderer before a paid music request. This may
+      // prepare Chromium, but never calls ElevenLabs.
+      const browser = await browserExecutable(context, runtime);
+      if (runtime.packaged && invocation.options.rebuild) {
+        emitter.warn("安装版使用不可变预构建 runtime，--rebuild 不会改写它");
+      }
+      emitter.started({
+        source: input.source,
+        output: outPath,
+        preparedConfig: preparedConfigPath,
+        lock: lockPath,
+        bgm: bgmMode,
+        credentialConfigured: credential.configured,
+      });
+      const production = await prepareVideoProduction({
+        input,
+        runtime,
+        exportOptions: options,
+        mode: bgmMode,
+        prompt: invocation.options.bgmPrompt,
+        replaceBgm: invocation.options.replaceBgm,
+        allowCustomStructure: invocation.options.allowCustomStructure,
+        durationSec: invocation.options.duration,
+        volume: invocation.options.volume,
+        audioKind: invocation.options.audioKind,
+        model: invocation.options.model,
+        preparedConfigPath,
+        lockPath,
+        overwrite: invocation.options.force === true,
+        offline: invocation.global.offline,
+        elevenLabsApiKey: credential.apiKey ?? undefined,
+        signal,
+        onWarning: (warning) => emitter.warn(warning),
+        onAudioProgress: (ratio, stage) => {
+          emitter.progress(ratio * 0.25, {
+            stage: `audio-${stage}`,
+            message: stage === "reused"
+              ? "复用已验证的背景音频"
+              : `背景音频准备 ${Math.floor(ratio * 100)}%`,
+          });
+        },
+      });
+      const lockedInput = await loadProjectInput(production.lockPath);
+      assertLockRuntime(lockedInput, runtime);
+      const rendered = await renderVideo({
+        ...runtimeRenderBase(context, runtime, browser, lockedInput, options),
+        outPath,
+        coverPath,
+        overwrite: invocation.options.force === true,
+        requireAudioTrack:
+          production.preparedInput.config.content.bgm !== null ||
+          production.preparedInput.config.opening.curtain.sfx !== null,
+        rebuild: !runtime.packaged && invocation.options.rebuild === true,
+        onProgress: (ratio) => {
+          emitter.progress(0.25 + ratio * 0.75, {
+            stage: "render",
+            message: `视频渲染 ${Math.floor(ratio * 100)}%`,
+          });
+        },
+      });
+      return {
+        result: {
+          output: rendered.outputPath,
+          cover: rendered.coverPath ?? null,
+          durationSec: rendered.durationSec,
+          sizeBytes: rendered.media.sizeBytes,
+          media: rendered.media,
+          export: options,
+          scenes: createRenderPlan(production.preparedInput, options).timeline,
+          productionGuard: {
+            policy: invocation.options.allowCustomStructure === true ? "custom" : "standard",
+            passed: true,
+          },
+          preparedConfig: production.preparedConfig,
+          lock: production.lockPath,
+          lockDigest: production.lock.digest,
+          audio: production.audio,
+        },
+        message: `视频与背景音频工作流完成 → ${rendered.outputPath}`,
+      };
     }
     case "render": {
       const source = invocation.positionals[0];
@@ -531,6 +816,108 @@ async function dispatch(context: CommandContext): Promise<CommandResult> {
     case "probe": {
       const media = await probeMedia(invocation.positionals[0]);
       return { result: media };
+    }
+    case "audio.plan":
+    case "audio.generate": {
+      const input = await loadInput(context, invocation.positionals[0]);
+      if (input.lock) {
+        const runtime = await context.getRuntime();
+        assertLockRuntime(input, runtime);
+      }
+      const videoPlan = createRenderPlan(input);
+      const audioPlan = createAudioGenerationPlan({
+        kind: invocation.options.audioKind,
+        provider: invocation.options.provider,
+        model: invocation.options.model,
+        prompt: invocation.options.prompt!,
+        contentDurationSec: videoPlan.timeline.content.seconds,
+        generationDurationSec: invocation.options.duration,
+        volume: invocation.options.volume,
+        outputPath: invocation.options.out ? path.resolve(invocation.options.out) : undefined,
+        manifestPath: invocation.options.manifest
+          ? path.resolve(invocation.options.manifest)
+          : undefined,
+        baseDir: input.baseDir,
+      });
+      assertExtension(audioPlan.outputPath, [".mp3"], "options.out");
+      assertExtension(audioPlan.manifestPath, [".json"], "options.manifest");
+      if (audioPlan.outputPath === audioPlan.manifestPath) {
+        throw new CliError("OPTION_CONFLICT", "音频与 manifest 不能写入同一路径", {
+          issues: [
+            { path: "options.out", message: audioPlan.outputPath },
+            { path: "options.manifest", message: audioPlan.manifestPath },
+          ],
+        });
+      }
+      const configPatch = {
+        content: {
+          bgm: {
+            asset: {
+              kind: "file" as const,
+              path: portablePathFrom(input.baseDir, audioPlan.outputPath),
+            },
+            volume: audioPlan.volume,
+          },
+        },
+      };
+      if (invocation.id === "audio.plan") {
+        return {
+          result: { plan: audioPlan, configPatch },
+          message: `背景音频计划完成 · ${audioPlan.kind} · ${audioPlan.generationDurationSec.toFixed(2)} 秒 · 未联网、未扣费`,
+        };
+      }
+      emitter.started({
+        kind: audioPlan.kind,
+        provider: audioPlan.provider,
+        authMode: audioPlan.auth.mode,
+        model: audioPlan.model,
+        output: audioPlan.outputPath,
+        manifest: audioPlan.manifestPath,
+        durationSec: audioPlan.generationDurationSec,
+      });
+      const onAudioProgress = (ratio: number, stage: string) => {
+        emitter.progress(ratio, {
+          stage: `audio-${stage}`,
+          message: stage === "reused"
+            ? "复用已验证的背景音频"
+            : `背景音频生成 ${Math.floor(ratio * 100)}%`,
+        });
+      };
+      let generated;
+      try {
+        // Cache reuse is deliberately attempted before resolving credentials
+        // or rejecting offline mode.  generatePlannedAudio keeps this check
+        // inside its generation lock and only returns a digest/duration
+        // verified manifest+MP3 pair.
+        generated = await generatePlannedAudio({
+          plan: audioPlan,
+          configBaseDir: input.baseDir,
+          remoteAllowed: false,
+          remoteDisabledError: invocation.global.offline
+            ? "OFFLINE_RESOURCE_MISSING"
+            : "AUTH_REQUIRED",
+          signal,
+          onProgress: onAudioProgress,
+        });
+      } catch (error) {
+        const expectedCacheMiss = isCliError(error) &&
+          (error.code === "AUTH_REQUIRED" || error.code === "OFFLINE_RESOURCE_MISSING");
+        if (!expectedCacheMiss || invocation.global.offline) {
+          throw error;
+        }
+        generated = await generatePlannedAudio({
+          plan: audioPlan,
+          elevenLabsApiKey: (await resolveElevenLabsCredential()).apiKey ?? undefined,
+          configBaseDir: input.baseDir,
+          overwrite: invocation.options.force === true,
+          signal,
+          onProgress: onAudioProgress,
+        });
+      }
+      return {
+        result: { ...generated, configPatch },
+        message: `背景音频已生成 → ${generated.output}`,
+      };
     }
     case "config.schema": {
       resolveTemplate(invocation.options.template);
@@ -842,9 +1229,24 @@ function normalizeCommandError(
       cause: error,
     });
   }
-  if (["render", "still", "batch"].includes(command)) {
+  if (command === "produce" && /读不到|不是合法 JSON/.test(message)) {
+    return new CliError("CONFIG_READ_FAILED", message, { cause: error });
+  }
+  if (["produce", "render", "still", "batch"].includes(command)) {
     return new CliError("RENDER_FAILED", message, {
       hint: "运行 validate、probe 与 doctor 可进一步定位问题。",
+      cause: error,
+    });
+  }
+  if (["audio.plan", "audio.generate"].includes(command) && /读不到|不是合法 JSON/.test(message)) {
+    return new CliError("CONFIG_READ_FAILED", message, { cause: error });
+  }
+  if (command === "audio.plan") {
+    return new CliError("CONFIG_INVALID", message, { cause: error });
+  }
+  if (command === "audio.generate") {
+    return new CliError("OUTPUT_WRITE_FAILED", message, {
+      hint: "检查输出目录、权限与 manifest 路径；已有输出不会自动覆盖。",
       cause: error,
     });
   }

@@ -47,9 +47,18 @@ jobs:
           node-version: 22
           cache: npm
 
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.33"
+          enable-cache: true
+
+      - name: Install pinned MCP Python
+        run: uv python install 3.12.11
+
       - name: Verify release source and approval gates
         env:
           CLI_DISTRIBUTION_APPROVED: ${{ vars.CLI_DISTRIBUTION_APPROVED }}
+          ELEVENLABS_MCP_DISTRIBUTION_APPROVED: ${{ vars.ELEVENLABS_MCP_DISTRIBUTION_APPROVED }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -99,12 +108,12 @@ jobs:
             echo "::error::Packaged asset-rights inventory is out of sync"
             exit 1
           }
-          cmp -s THIRD_PARTY_NOTICES.md packages/littlestart-cli/THIRD_PARTY_NOTICES.md || {
-            echo "::error::Packaged third-party notices are out of sync"
-            exit 1
-          }
           if [ "$CLI_DISTRIBUTION_APPROVED" != "true" ]; then
             echo "::error::Set CLI_DISTRIBUTION_APPROVED=true after Remotion and third-party review"
+            exit 1
+          fi
+          if [ "$ELEVENLABS_MCP_DISTRIBUTION_APPROVED" != "true" ]; then
+            echo "::error::Set ELEVENLABS_MCP_DISTRIBUTION_APPROVED=true only after legal approval of the GPL-containing official MCP dependency closure"
             exit 1
           fi
 
@@ -126,8 +135,14 @@ jobs:
           npm run test:cli
           npm run test:cli:repro
           npm run test:skills
+          node --no-warnings --experimental-strip-types --test tests/mcp-packaging.test.mts
           npm run build:cli
+          cmp -s THIRD_PARTY_NOTICES.md packages/littlestart-cli/THIRD_PARTY_NOTICES.md || {
+            echo "::error::Packaged third-party notices are out of sync after build:cli"
+            exit 1
+          }
           npm run build:electron
+          node scripts/build-elevenlabs-mcp.mjs
           npm audit --omit=dev --audit-level=high
 
       # electron-builder starts separate asynchronous DMG and ZIP publishers.
@@ -166,7 +181,36 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           GH_TOKEN: ${{ github.token }}
+          LITTLESTART_REQUIRE_ELEVENLABS_MCP: "true"
         run: npx electron-builder --mac --publish always
+
+      - name: Verify signed and notarized MCP sidecar
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find release -maxdepth 3 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::Packaged macOS application not found"
+            exit 1
+          fi
+          MCP_ROOT="$APP_PATH/Contents/Resources/mcp/elevenlabs/darwin-arm64"
+          MCP_EXECUTABLE="$MCP_ROOT/elevenlabs-mcp"
+          test -x "$MCP_EXECUTABLE"
+          codesign --verify --strict --verbose=2 "$MCP_EXECUTABLE"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          MCP_ROOT="$MCP_ROOT" node <<'NODE'
+          const path = require("node:path");
+          const {
+            runMcpStdioSmoke,
+            verifyPinnedMcpBundle,
+          } = require("./build/verify-cli-resource.cjs");
+          const lockPath = path.resolve("mcp/elevenlabs/lock.json");
+          const verified = verifyPinnedMcpBundle(process.env.MCP_ROOT, lockPath);
+          runMcpStdioSmoke(verified.executablePath, verified.lock).catch((error) => {
+            console.error(`::error::${error instanceof Error ? error.message : String(error)}`);
+            process.exitCode = 1;
+          });
+          NODE
 
       - name: Verify and publish release
         env:

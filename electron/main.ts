@@ -8,11 +8,13 @@
 import {
   app,
   BrowserWindow,
+  Menu,
   ipcMain,
   dialog,
   shell,
   nativeTheme,
   type IpcMainInvokeEvent,
+  type MenuItemConstructorOptions,
 } from "electron";
 import path from "node:path";
 import fs from "node:fs/promises";
@@ -29,6 +31,10 @@ import {
 } from "./render";
 import { initAutoUpdate } from "./updater";
 import { createDesktopCliInstaller } from "./cli-installer";
+import {
+  ensureElevenLabsCredentialFile,
+  promptAndStoreElevenLabsCredential,
+} from "./elevenlabs-credential-dialog.ts";
 import { updateRestartGuard } from "./update-restart-guard";
 import {
   beginExportWithUpdateInterlock,
@@ -87,9 +93,10 @@ function isTrustedCliRequest(event: IpcMainInvokeEvent, argumentCount: number): 
   }
 }
 
-function initCliInstall(): void {
+function initCliInstall() {
+  const supported = app.isPackaged && process.platform === "darwin" && process.arch === "arm64";
   const installer = createDesktopCliInstaller({
-    supported: app.isPackaged && process.platform === "darwin" && process.arch === "arm64",
+    supported,
     homeDir: app.getPath("home"),
     shellPath: process.env.SHELL?.trim() || "/bin/zsh",
     pathEnv: process.env.PATH ?? "",
@@ -98,6 +105,47 @@ function initCliInstall(): void {
     cliRoot: path.join(process.resourcesPath, "cli"),
   });
   let installRequestInFlight: Promise<Awaited<ReturnType<typeof installer.install>>> | null = null;
+  let credentialRequestInFlight: Promise<
+    | { ok: true; state: Awaited<ReturnType<typeof installer.getElevenLabsState>> }
+    | {
+        ok: false;
+        error: string;
+        state: Awaited<ReturnType<typeof installer.getElevenLabsState>>;
+        canceled?: boolean;
+      }
+  > | null = null;
+
+  const configureElevenLabsCredential = () => {
+    if (credentialRequestInFlight) return credentialRequestInFlight;
+    credentialRequestInFlight = (async () => {
+      const cliState = await installer.getState();
+      const elevenLabs = cliState.elevenLabs ?? (await installer.getElevenLabsState());
+      if (!supported || cliState.status !== "installed" || elevenLabs.runtime !== "available") {
+        return {
+          ok: false as const,
+          error: "ElevenLabs MCP 尚未随 CLI 完整安装，请先更新或修复客户端。",
+          state: elevenLabs,
+        };
+      }
+      try {
+        const result = await promptAndStoreElevenLabsCredential(app.getPath("home"));
+        const state = await installer.getElevenLabsState();
+        if (result === "skipped") {
+          return { ok: false as const, canceled: true, error: "已跳过配置", state };
+        }
+        return { ok: true as const, state };
+      } catch {
+        return {
+          ok: false as const,
+          error: "未能保存 ElevenLabs API Key，请检查本机配置目录权限后重试。",
+          state: await installer.getElevenLabsState(),
+        };
+      }
+    })().finally(() => {
+      credentialRequestInFlight = null;
+    });
+    return credentialRequestInFlight;
+  };
 
   const confirmInstall = (state: Awaited<ReturnType<typeof installer.getState>>): Promise<boolean> => {
     const window = mainWindow;
@@ -108,7 +156,7 @@ function initCliInstall(): void {
         type: "question",
         title: `${verb} Littlestart CLI`,
         message: `${verb}命令行工具？`,
-        detail: `将写入 ${state.installPath ?? "~/.local/bin/littlestart"}，并在需要时为新终端配置 PATH。不会使用管理员权限或联网下载。`,
+        detail: `将写入 ${state.installPath ?? "~/.local/bin/littlestart"}、随附的 ElevenLabs MCP 启动器，并把视频生成 Skill 安装到本机 Codex 和 Claude 用户目录；需要时为新终端配置 PATH。安装后可选填写 API Key；跳过不影响视频 CLI。不会使用管理员权限或联网下载，也不会覆盖用户自定义 Skill。`,
         buttons: [verb, "取消"],
         defaultId: 0,
         cancelId: 1,
@@ -117,18 +165,7 @@ function initCliInstall(): void {
       .then((result) => result.response === 0);
   };
 
-  ipcMain.handle(DESKTOP_CLI_CHANNELS.getState, (event, ...args: unknown[]) => {
-    if (!isTrustedCliRequest(event, args.length)) {
-      throw new Error("拒绝来自非可信页面的 CLI 请求");
-    }
-    return installer.getState();
-  });
-
-  ipcMain.handle(DESKTOP_CLI_CHANNELS.install, async (event, ...args: unknown[]) => {
-    if (!isTrustedCliRequest(event, args.length)) {
-      throw new Error("拒绝来自非可信页面的 CLI 请求");
-    }
-
+  const installCli = async () => {
     if (installRequestInFlight) return installRequestInFlight;
     installRequestInFlight = (async () => {
       const plan = await installer.prepareInstall();
@@ -143,10 +180,8 @@ function initCliInstall(): void {
       if (!(await confirmInstall(state))) {
         return { ok: false as const, canceled: true, error: "已取消安装", state };
       }
-      // Acquire this synchronously after confirmation and hold it across the
-      // complete launcher/profile transaction. The updater cannot commit a
-      // restart while an entry is quarantined, and a committed restart makes
-      // this acquisition fail before the installer mutates the filesystem.
+      // Hold the updater interlock across the complete launcher/profile/Skill
+      // transaction. A committed restart makes this fail before any writes.
       const releaseRestartBlocker = updateRestartGuard.tryAcquireRestartBlocker();
       if (!releaseRestartBlocker) {
         return {
@@ -155,16 +190,131 @@ function initCliInstall(): void {
           state,
         };
       }
+      let result: Awaited<ReturnType<typeof installer.install>>;
       try {
-        return await installer.install(plan);
+        result = await installer.install(plan);
       } finally {
         releaseRestartBlocker();
       }
+      if (!result.ok) return result;
+
+      // Key setup is optional and runs only after the complete local install
+      // commits. Skipping it never disables or rolls back the video CLI.
+      try {
+        await ensureElevenLabsCredentialFile(app.getPath("home"));
+        const elevenLabs = await installer.getElevenLabsState();
+        if (elevenLabs.credential === "missing" && elevenLabs.runtime === "available") {
+          const configured = await configureElevenLabsCredential();
+          if (!configured.ok && !configured.canceled && mainWindow) {
+            await dialog.showMessageBox(mainWindow, {
+              type: "warning",
+              title: "ElevenLabs 尚未配置",
+              message: "CLI 已安装，但 ElevenLabs API Key 未能保存。",
+              detail: "你仍然可以生成视频，之后可在“命令行与自动化”或应用菜单中重新配置背景音或环境音效。",
+              buttons: ["知道了"],
+              defaultId: 0,
+              noLink: true,
+            });
+          }
+        }
+      } catch {
+        // Credential setup remains optional; state reports it truthfully.
+      }
+      return { ...result, state: await installer.getState() };
     })().finally(() => {
       installRequestInFlight = null;
     });
     return installRequestInFlight;
+  };
+
+  ipcMain.handle(DESKTOP_CLI_CHANNELS.getState, (event, ...args: unknown[]) => {
+    if (!isTrustedCliRequest(event, args.length)) {
+      throw new Error("拒绝来自非可信页面的 CLI 请求");
+    }
+    return installer.getState();
   });
+
+  ipcMain.handle(DESKTOP_CLI_CHANNELS.install, async (event, ...args: unknown[]) => {
+    if (!isTrustedCliRequest(event, args.length)) {
+      throw new Error("拒绝来自非可信页面的 CLI 请求");
+    }
+    return installCli();
+  });
+
+  ipcMain.handle(DESKTOP_CLI_CHANNELS.configureElevenLabs, (event, ...args: unknown[]) => {
+    if (!isTrustedCliRequest(event, args.length)) {
+      throw new Error("拒绝来自非可信页面的 CLI 请求");
+    }
+    return configureElevenLabsCredential();
+  });
+
+  return { installCli, configureElevenLabsCredential };
+}
+
+function installNativeMenu(cli: ReturnType<typeof initCliInstall>): void {
+  const showInstallResult = async () => {
+    if (!mainWindow) return;
+    const result = await cli.installCli();
+    if (result.ok) {
+      await dialog.showMessageBox(mainWindow, {
+        type: "info",
+        title: "Littlestart CLI 已就绪",
+        message: "CLI、ElevenLabs MCP 和视频生成 Skill 已安装。",
+        detail: "新打开一个终端后可以使用 littlestart。ElevenLabs API Key 如果跳过，可稍后再配置。",
+        buttons: ["知道了"],
+        defaultId: 0,
+        noLink: true,
+      });
+      return;
+    }
+    if (result.canceled) return;
+    await dialog.showMessageBox(mainWindow, {
+      type: "error",
+      title: "CLI 安装未完成",
+      message: result.error,
+      detail: result.state.message ?? "请根据提示处理冲突后再试；不会覆盖用户自定义的 Skill。",
+      buttons: ["知道了"],
+      defaultId: 0,
+      noLink: true,
+    });
+  };
+
+  const configureCredential = async () => {
+    if (!mainWindow) return;
+    const result = await cli.configureElevenLabsCredential();
+    if (result.ok || result.canceled) return;
+    await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "ElevenLabs API Key 未配置",
+      message: result.error,
+      buttons: ["知道了"],
+      defaultId: 0,
+      noLink: true,
+    });
+  };
+
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: app.name,
+      submenu: [
+        { role: "about" },
+        { type: "separator" },
+        { label: "安装或修复 Littlestart CLI…", click: () => void showInstallResult() },
+        { label: "配置 ElevenLabs API Key…", click: () => void configureCredential() },
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        { role: "quit" },
+      ],
+    },
+    { role: "editMenu" },
+    { role: "windowMenu" },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 function createWindow() {
@@ -317,8 +467,9 @@ app.whenReady().then(() => {
   // Register updater IPC before loading the remote page so hydration can never
   // race ahead of the main-process handlers.
   initAutoUpdate(() => mainWindow);
-  initCliInstall();
+  const cli = initCliInstall();
   createWindow();
+  installNativeMenu(cli);
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

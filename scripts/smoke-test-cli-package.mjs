@@ -57,8 +57,10 @@ try {
 
   const packDir = path.join(temporary, "pack");
   const projectDir = path.join(temporary, "empty-project");
+  const isolatedHome = path.join(temporary, "home");
   await fs.mkdir(packDir, { recursive: true });
   await fs.mkdir(projectDir, { recursive: true });
+  await fs.mkdir(isolatedHome, { recursive: true, mode: 0o700 });
   await fs.writeFile(
     path.join(projectDir, "package.json"),
     `${JSON.stringify({ private: true, name: "littlestart-empty-smoke" }, null, 2)}\n`,
@@ -86,7 +88,15 @@ try {
     "littlestart.cjs",
   );
   const runCli = async (args, stdin) => {
-    const completed = await execute(process.execPath, [cli, ...args], { cwd: projectDir, stdin });
+    const completed = await execute(process.execPath, [cli, ...args], {
+      cwd: projectDir,
+      stdin,
+      env: {
+        ELEVENLABS_API_KEY: "",
+        HOME: isolatedHome,
+        LITTLESTART_ENV_FILE: path.join(isolatedHome, ".config", "littlestart", "secrets.env"),
+      },
+    });
     return parseEnvelope(completed.stdout, args.join(" "));
   };
 
@@ -99,23 +109,41 @@ try {
   }
   const configPath = path.join(projectDir, "video.json");
   await runCli(["init", configPath, "--minimal", "--json"]);
+  const minimal = JSON.parse(await fs.readFile(configPath, "utf8"));
+  if (
+    !minimal?.opening?.title ||
+    !minimal?.content?.teleprompter?.text ||
+    Object.hasOwn(minimal.opening, "countdown") ||
+    Object.hasOwn(minimal.opening, "curtain") ||
+    Object.hasOwn(minimal.content, "bgm") ||
+    Object.hasOwn(minimal, "ending")
+  ) {
+    throw new Error("init --minimal 不应覆盖标准开场、BGM 或片尾");
+  }
+  minimal.opening.title.text = "CLI 空目录标准成片验收";
+  minimal.content.teleprompter.text.content = [
+    "Mayday, Mayday, Mayday. Approach, Flight 724 reporting an engine fire.",
+    "We have shut the affected engine down and are maintaining controlled flight.",
+    "Request immediate vectors, priority landing clearance, and emergency services standing by.",
+    "Confirm the runway, wind, and any further instructions. Flight 724 is ready to read back.",
+  ].join("\n\n");
   await fs.writeFile(
     configPath,
-    `${JSON.stringify(
-      {
-        opening: {
-          title: { text: "CLI 空目录验收" },
-          countdown: { enabled: false },
-          curtain: { openDurationSec: 0.4 },
-        },
-        content: { teleprompter: { mode: "text", text: { content: "第一句。\n第二句。" } } },
-      },
-      null,
-      2,
-    )}\n`,
+    `${JSON.stringify(minimal, null, 2)}\n`,
   );
   const validation = await runCli(["validate", configPath, "--json"]);
   const plan = await runCli(["plan", configPath, "--json"]);
+  const timeline = plan.plan?.timeline;
+  if (
+    !timeline ||
+    timeline.opening?.seconds < 1 ||
+    timeline.content?.seconds <= 0 ||
+    timeline.ending?.seconds < 1 ||
+    timeline.total?.frames !==
+      timeline.opening?.frames + timeline.content?.frames + timeline.ending?.frames
+  ) {
+    throw new Error("空目录配置未保留标准 opening/content/ending 结构");
+  }
   await runCli(["config", "schema", "--out", "schema.json", "--json"]);
   await runCli(["config", "lock", configPath, "--out", "video.lock.json", "--json"]);
   await runCli(["validate", "video.lock.json", "--json"]);
@@ -148,7 +176,7 @@ try {
       "--json",
     ]);
     rendered = await runCli([
-      "render",
+      "produce",
       configPath,
       "--out",
       "output.mp4",
@@ -163,8 +191,27 @@ try {
       "--cache-dir",
       cacheDir,
       "--offline",
+      "--bgm",
+      "off",
+      "--prepared-config",
+      "video.prepared.json",
+      "--lock",
+      "video.produced.lock.json",
       "--json",
     ]);
+    if (
+      rendered.productionGuard?.policy !== "standard" ||
+      rendered.productionGuard?.passed !== true ||
+      rendered.scenes?.opening?.seconds < 1 ||
+      rendered.scenes?.ending?.seconds < 1 ||
+      rendered.media?.videoCodec !== "h264" ||
+      rendered.media?.audioCodec !== "aac" ||
+      rendered.media?.width !== 720 ||
+      rendered.media?.height !== 1280 ||
+      Math.abs((rendered.media?.fps ?? 0) - 30) > 0.01
+    ) {
+      throw new Error("空目录 produce 未通过标准结构或 H.264/AAC 媒体验收");
+    }
     await runCli(["probe", "output.mp4", "--json"]);
   }
 

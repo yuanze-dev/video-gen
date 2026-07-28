@@ -902,6 +902,58 @@ test("probes a real bundled video using media-parser", async () => {
   assert.ok(result.videoCodec);
 });
 
+test("post-render verification rejects wrong structure and accepts bounded container padding", () => {
+  const media = {
+    path: "/tmp/video.mp4",
+    sizeBytes: 1_000,
+    durationSec: 10.08,
+    width: 1080,
+    height: 1920,
+    fps: 60,
+    videoCodec: "h264",
+    audioCodec: "aac",
+    container: "mp4",
+    mimeType: "video/mp4",
+  };
+  assert.doesNotThrow(() =>
+    core.assertRenderedMediaMatchesPlan(media, {
+      width: 1080,
+      height: 1920,
+      fps: 60,
+      durationSec: 10,
+      requireAudioTrack: true,
+    }),
+  );
+  assert.throws(
+    () => core.assertRenderedMediaMatchesPlan({ ...media, durationSec: 8 }, {
+      width: 1080,
+      height: 1920,
+      fps: 60,
+      durationSec: 10,
+    }),
+    /预期约 10\.000 秒/,
+  );
+  assert.throws(
+    () => core.assertRenderedMediaMatchesPlan({ ...media, width: 720 }, {
+      width: 1080,
+      height: 1920,
+      fps: 60,
+      durationSec: 10,
+    }),
+    /预期 1080×1920/,
+  );
+  assert.throws(
+    () => core.assertRenderedMediaMatchesPlan({ ...media, audioCodec: null }, {
+      width: 1080,
+      height: 1920,
+      fps: 60,
+      durationSec: 10,
+      requireAudioTrack: true,
+    }),
+    /缺少音频轨/,
+  );
+});
+
 test("builds an immutable cache bundle without nesting public/remotion-site", { timeout: 120_000 }, async () => {
   const cache = await fs.mkdtemp(path.join(os.tmpdir(), "littlestart-bundle-"));
   try {

@@ -7,9 +7,12 @@ export type CliCommandId =
   | "init"
   | "validate"
   | "plan"
+  | "produce"
   | "render"
   | "still"
   | "probe"
+  | "audio.plan"
+  | "audio.generate"
   | "config.schema"
   | "config.resolve"
   | "config.lock"
@@ -32,9 +35,11 @@ export type CliTopLevelCommand =
   | "init"
   | "validate"
   | "plan"
+  | "produce"
   | "render"
   | "still"
   | "probe"
+  | "audio"
   | "config"
   | "templates"
   | "assets"
@@ -70,6 +75,19 @@ export interface CliCommandOptions {
   readonly resume?: true;
   readonly target?: "codex" | "claude" | "both";
   readonly scope?: "project" | "user";
+  readonly prompt?: string;
+  readonly duration?: number;
+  readonly volume?: number;
+  readonly provider?: "elevenlabs";
+  readonly audioKind?: "music" | "sound-effect";
+  readonly model?: "music_v2" | "music_v1";
+  readonly manifest?: string;
+  readonly bgm?: "auto" | "off" | "required";
+  readonly bgmPrompt?: string;
+  readonly replaceBgm?: true;
+  readonly allowCustomStructure?: true;
+  readonly preparedConfig?: string;
+  readonly lock?: string;
 }
 
 export interface ParsedCliInvocation {
@@ -155,6 +173,33 @@ export const CLI_COMMAND_SPECS: readonly CliCommandSpec[] = Object.freeze([
     options: ["quality", "resolution", "fps"],
   },
   {
+    id: "produce",
+    path: ["produce"],
+    usage: "littlestart produce <配置.json> [--bgm auto|off|required] [--audio-kind sound-effect|music] [渲染选项]",
+    summary: "自动准备背景音频、配置和锁文件，并一键渲染视频",
+    minPositionals: 1,
+    maxPositionals: 1,
+    options: [
+      "bgm",
+      "bgm-prompt",
+      "replace-bgm",
+      "allow-custom-structure",
+      "duration",
+      "volume",
+      "audio-kind",
+      "model",
+      "prepared-config",
+      "lock",
+      "out",
+      "cover",
+      "quality",
+      "resolution",
+      "fps",
+      "rebuild",
+      "force",
+    ],
+  },
+  {
     id: "render",
     path: ["render"],
     usage: "littlestart render <配置.json|-> [渲染选项]",
@@ -180,6 +225,26 @@ export const CLI_COMMAND_SPECS: readonly CliCommandSpec[] = Object.freeze([
     minPositionals: 1,
     maxPositionals: 1,
     options: [],
+  },
+  {
+    id: "audio.plan",
+    path: ["audio", "plan"],
+    usage: "littlestart audio plan <配置.json|-> --prompt <描述> [音频选项]",
+    summary: "规划 ElevenLabs 音乐或音效生成，但不联网、不扣费",
+    minPositionals: 1,
+    maxPositionals: 1,
+    options: ["prompt", "duration", "volume", "provider", "audio-kind", "model", "out", "manifest"],
+    requiredOptions: ["prompt"],
+  },
+  {
+    id: "audio.generate",
+    path: ["audio", "generate"],
+    usage: "littlestart audio generate <配置.json|-> --prompt <描述> [--out <音频.mp3>] [音频选项]",
+    summary: "通过官方 ElevenLabs MCP 生成本地音乐或音效",
+    minPositionals: 1,
+    maxPositionals: 1,
+    options: ["prompt", "duration", "volume", "provider", "audio-kind", "model", "out", "manifest", "force"],
+    requiredOptions: ["prompt"],
   },
   {
     id: "config.schema",
@@ -310,7 +375,7 @@ export const CLI_COMMAND_SPECS: readonly CliCommandSpec[] = Object.freeze([
   },
 ]);
 
-type OptionKind = "boolean" | "string" | "enum" | "positiveInteger";
+type OptionKind = "boolean" | "string" | "enum" | "positiveInteger" | "number";
 
 interface OptionDefinition {
   readonly property: string;
@@ -363,6 +428,35 @@ const OPTION_DEFINITIONS: Readonly<Record<string, OptionDefinition>> = Object.fr
     kind: "enum",
     values: ["project", "user"],
   },
+  prompt: { property: "prompt", kind: "string" },
+  duration: { property: "duration", kind: "number", min: 0.5, max: 600 },
+  volume: { property: "volume", kind: "number", min: 0, max: 1 },
+  provider: {
+    property: "provider",
+    kind: "enum",
+    values: ["elevenlabs"],
+  },
+  "audio-kind": {
+    property: "audioKind",
+    kind: "enum",
+    values: ["music", "sound-effect"],
+  },
+  model: {
+    property: "model",
+    kind: "enum",
+    values: ["music_v2", "music_v1"],
+  },
+  bgm: {
+    property: "bgm",
+    kind: "enum",
+    values: ["auto", "off", "required"],
+  },
+  "bgm-prompt": { property: "bgmPrompt", kind: "string" },
+  "replace-bgm": { property: "replaceBgm", kind: "boolean" },
+  "allow-custom-structure": { property: "allowCustomStructure", kind: "boolean" },
+  "prepared-config": { property: "preparedConfig", kind: "string" },
+  lock: { property: "lock", kind: "string" },
+  manifest: { property: "manifest", kind: "string" },
 });
 
 export const CLI_GLOBAL_OPTION_NAMES = Object.freeze([
@@ -467,6 +561,23 @@ function parseOptionValue(
     return rawValue;
   }
 
+  if (definition.kind === "number") {
+    const parsed = Number(rawValue);
+    if (
+      !Number.isFinite(parsed) ||
+      parsed < (definition.min ?? -Number.MAX_VALUE) ||
+      parsed > (definition.max ?? Number.MAX_VALUE)
+    ) {
+      throw optionError(
+        "INVALID_OPTION_VALUE",
+        `--${name} 必须在 ${definition.min ?? "-∞"} 到 ${definition.max ?? "∞"} 之间`,
+        index,
+        { value: rawValue },
+      );
+    }
+    return parsed;
+  }
+
   if (!/^\d+$/.test(rawValue)) {
     throw optionError(
       "INVALID_OPTION_VALUE",
@@ -560,7 +671,10 @@ function tokenize(argv: readonly string[]): TokenizedArguments {
         next === "--" ||
         (next.startsWith("-") &&
           next !== "-" &&
-          !(definition.kind === "positiveInteger" && /^-\d/.test(next)));
+          !(
+            (definition.kind === "positiveInteger" || definition.kind === "number") &&
+            /^-\d/.test(next)
+          ));
       if (nextLooksLikeOption) {
         throw optionError(
           "OPTION_VALUE_REQUIRED",
@@ -591,9 +705,11 @@ const TOP_LEVEL_COMMANDS = Object.freeze([
   "init",
   "validate",
   "plan",
+  "produce",
   "render",
   "still",
   "probe",
+  "audio",
   "config",
   "templates",
   "assets",
@@ -605,10 +721,11 @@ const TOP_LEVEL_COMMANDS = Object.freeze([
 
 const GROUPS: Readonly<
   Record<
-    "config" | "templates" | "assets" | "cache" | "skill",
+    "audio" | "config" | "templates" | "assets" | "cache" | "skill",
     { readonly subcommands: readonly string[]; readonly defaultId?: CliCommandId }
   >
 > = Object.freeze({
+  audio: { subcommands: ["plan", "generate"] },
   config: { subcommands: ["schema", "resolve", "lock", "migrate"] },
   templates: { subcommands: ["list", "show"], defaultId: "templates.list" },
   assets: { subcommands: ["list", "inspect"], defaultId: "assets.list" },
@@ -909,6 +1026,33 @@ export function parseCliArgs(
     const definition = OPTION_DEFINITIONS[option.name];
     if (definition.global) continue;
     commandOptions[definition.property] = option.value;
+  }
+
+  if (["produce", "audio.plan", "audio.generate"].includes(spec.id)) {
+    const audioKind = commandOptions.audioKind ?? "sound-effect";
+    if (audioKind === "sound-effect" && commandOptions.model !== undefined) {
+      throw new CliError("OPTION_CONFLICT", "--audio-kind sound-effect 不能与 --model 同时使用", {
+        issues: [
+          { path: "options.audioKind", message: "sound-effect" },
+          { path: "options.model", message: String(commandOptions.model) },
+        ],
+        hint: "--model 只用于 music；音效固定调用 text_to_sound_effects。",
+      });
+    }
+    const duration = commandOptions.duration;
+    if (typeof duration === "number") {
+      const minimum = audioKind === "sound-effect" ? 0.5 : 3;
+      const maximum = audioKind === "sound-effect" ? 5 : 600;
+      if (duration < minimum || duration > maximum) {
+        const parsed = tokenized.options.get("duration");
+        throw optionError(
+          "INVALID_OPTION_VALUE",
+          `--duration 在 ${audioKind} 模式下必须在 ${minimum} 到 ${maximum} 之间`,
+          parsed?.index ?? 0,
+          { value: duration },
+        );
+      }
+    }
   }
 
   const path = Object.freeze([...spec.path]);

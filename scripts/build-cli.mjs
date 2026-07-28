@@ -117,6 +117,20 @@ await build({
 });
 await fs.chmod(path.join(distDir, "littlestart.cjs"), 0o755);
 
+await build({
+  entryPoints: [path.join(root, "cli", "elevenlabs-mcp-launcher.ts")],
+  outfile: path.join(packageDir, "elevenlabs-mcp-launcher.cjs"),
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  target: "node20",
+  define: {
+    "process.env.LITTLESTART_PACKAGED": JSON.stringify("1"),
+  },
+  logLevel: "info",
+});
+await fs.chmod(path.join(packageDir, "elevenlabs-mcp-launcher.cjs"), 0o755);
+
 await fs.cp(
   path.join(root, "skills", "generate-video"),
   path.join(packageSkillsDir, "generate-video"),

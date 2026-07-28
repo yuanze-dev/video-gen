@@ -10,7 +10,22 @@ export const DESKTOP_UPDATE_CHANNELS = {
 export const DESKTOP_CLI_CHANNELS = {
   getState: "cli:get-state",
   install: "cli:install",
+  configureElevenLabs: "cli:configure-elevenlabs",
 } as const;
+
+export type DesktopElevenLabsState = {
+  credential: "configured" | "missing";
+  runtime: "available" | "missing";
+};
+
+export type DesktopSkillInstallState = {
+  status: "ready" | "missing" | "update-needed" | "conflict";
+  targets: Array<{
+    agent: "codex" | "claude";
+    path: string;
+    status: "ready" | "missing" | "update-needed" | "conflict";
+  }>;
+};
 
 export type DesktopCliInstallState = {
   status:
@@ -25,13 +40,17 @@ export type DesktopCliInstallState = {
   installedVersion?: string;
   installPath?: string;
   aliasPath?: string;
+  mcpInstallPath?: string;
   profilePath?: string;
   pathConfigured?: boolean;
+  elevenLabs?: DesktopElevenLabsState;
+  skill?: DesktopSkillInstallState;
   errorCode?:
     | "UNSUPPORTED_PLATFORM"
     | "APP_NOT_STABLE"
     | "CLI_RUNTIME_MISSING"
     | "EXISTING_COMMAND_CONFLICT"
+    | "SKILL_INSTALL_CONFLICT"
     | "VERIFY_FAILED"
     | "INSTALL_BUSY"
     | "ROLLBACK_FAILED"
@@ -44,6 +63,10 @@ export type DesktopCliInstallState = {
 export type DesktopCliInstallResult =
   | { ok: true; state: DesktopCliInstallState }
   | { ok: false; error: string; state: DesktopCliInstallState; canceled?: boolean };
+
+export type DesktopElevenLabsConfigureResult =
+  | { ok: true; state: DesktopElevenLabsState }
+  | { ok: false; error: string; state: DesktopElevenLabsState; canceled?: boolean };
 
 export type DesktopUpdateErrorPhase = "check" | "download" | "install";
 
@@ -90,6 +113,7 @@ export type DesktopRenderBridge = {
   /** Native-ready signal plus the main-process export/restart interlock. */
   supportsSafeUpdateRestart?: boolean;
   supportsCliInstall?: boolean;
+  supportsElevenLabsCredential?: boolean;
   beginExportSession?: () => Promise<
     { ok: true; sessionId: string } | { ok: false; error: string }
   >;
@@ -115,6 +139,7 @@ export type DesktopRenderBridge = {
   onUpdateState?: (callback: (state: DesktopUpdateState) => void) => () => void;
   getCliInstallState?: () => Promise<DesktopCliInstallState>;
   installCli?: () => Promise<DesktopCliInstallResult>;
+  configureElevenLabsCredential?: () => Promise<DesktopElevenLabsConfigureResult>;
 };
 
 export type DesktopUpdateClientMode =

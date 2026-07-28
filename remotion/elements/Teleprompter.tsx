@@ -1,9 +1,21 @@
-import { useEffect, useRef, useState } from "react";
-import { OffthreadVideo, useCurrentFrame, delayRender, continueRender } from "remotion";
+import { OffthreadVideo, useCurrentFrame } from "remotion";
 import type { ResolvedConfig } from "../../lib/resolved";
 import { FONT_STACK } from "../../lib/constants";
 
 type Tele = ResolvedConfig["content"]["teleprompter"];
+
+export function teleprompterScrollTransform(
+  frame: number,
+  contentFrames: number,
+  screenH: number,
+): { yPercent: number; leadOutY: number } {
+  const progress =
+    contentFrames <= 1 ? 0 : Math.max(0, Math.min(1, frame / (contentFrames - 1)));
+  return {
+    yPercent: progress === 0 ? 0 : -100 * progress,
+    leadOutY: screenH * 0.55 * progress,
+  };
+}
 
 export function Teleprompter(props: {
   tele: Tele;
@@ -74,32 +86,32 @@ function TeleText({
 }) {
   const frame = useCurrentFrame();
   const text = tele.text!;
-  const ref = useRef<HTMLDivElement>(null);
-  const [textH, setTextH] = useState<number | null>(null);
-  const [handle] = useState(() => delayRender("measure-teleprompter"));
 
-  useEffect(() => {
-    if (ref.current) {
-      setTextH(ref.current.scrollHeight);
-      continueRender(handle);
-    }
-  }, [handle]);
-
-  const distance = textH ? Math.max(0, textH - screenH) + screenH * 0.45 : 0;
-  const progress = contentFrames <= 1 ? 0 : Math.min(1, frame / (contentFrames - 1));
-  const y = -distance * progress;
+  // Remotion renders neighboring frames concurrently, often in different
+  // browser tabs. Reading scrollHeight in an effect made each tab choose its
+  // own travel distance, which showed up as alternating jumps in the encoded
+  // video. A percentage transform is resolved from the laid-out text box at
+  // paint time, so motion is a pure, linear function of the frame number.
+  // minHeight also makes the formula correct when the copy is shorter than the
+  // screen: the final line ends around 55% down the display, as before.
+  const { yPercent, leadOutY } = teleprompterScrollTransform(
+    frame,
+    contentFrames,
+    screenH,
+  );
 
   return (
     <div style={{ position: "absolute", inset: 0, background: text.bgColor }}>
       <div
-        ref={ref}
         style={{
           position: "absolute",
           left: 0,
           right: 0,
           top: 0,
           padding: screenW * 0.07,
-          transform: `translateY(${y}px)`,
+          boxSizing: "border-box",
+          minHeight: screenH,
+          transform: `translateY(calc(${yPercent}% + ${leadOutY}px))`,
           color: text.color,
           fontFamily: FONT_STACK,
           fontWeight: 800,

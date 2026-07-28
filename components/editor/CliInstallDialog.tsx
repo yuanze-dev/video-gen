@@ -2,9 +2,11 @@
 
 import { useRef, useState } from "react";
 import {
+  AudioWaveform,
   Check,
   CircleAlert,
   Copy,
+  KeyRound,
   Loader2,
   RotateCw,
   Terminal,
@@ -64,6 +66,7 @@ export function CliInstallDialog() {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [installing, setInstalling] = useState(false);
+  const [configuringElevenLabs, setConfiguringElevenLabs] = useState(false);
   const [state, setState] = useState<DesktopCliInstallState | null>(null);
   const requestRef = useRef(0);
 
@@ -98,14 +101,14 @@ export function CliInstallDialog() {
     setState((current) => ({
       ...(current ?? { status: "installing" as const }),
       status: "installing",
-      message: "正在写入启动器并验证运行环境…",
+      message: "正在安装 CLI、MCP 和 Codex/Claude 视频 Skill…",
     }));
     try {
       const result = await bridge.installCli();
       setState(result.state);
       if (result.ok && result.state.pathConfigured === false) {
-        toast.warning("CLI 已安装，还需要手动配置 PATH");
-      } else if (result.ok) toast.success("Littlestart CLI 已安装");
+        toast.warning("CLI 和视频 Skill 已安装，还需要手动配置 PATH");
+      } else if (result.ok) toast.success("CLI、MCP 和视频 Skill 已安装");
       else if (!result.canceled) toast.error(result.error);
     } catch {
       setState({
@@ -117,6 +120,30 @@ export function CliInstallDialog() {
       toast.error("CLI 安装没有完成");
     } finally {
       setInstalling(false);
+    }
+  };
+
+  const configureElevenLabs = async () => {
+    const bridge = window.electronRender;
+    if (
+      !bridge?.supportsElevenLabsCredential ||
+      !bridge.configureElevenLabsCredential
+    ) {
+      toast.error("当前桌面版不支持 ElevenLabs 密钥配置");
+      return;
+    }
+    setConfiguringElevenLabs(true);
+    try {
+      const result = await bridge.configureElevenLabsCredential();
+      setState((current) =>
+        current ? { ...current, elevenLabs: result.state } : current,
+      );
+      if (result.ok) toast.success("ElevenLabs API Key 已配置，将在生成时验证");
+      else if (!result.canceled) toast.error(result.error);
+    } catch {
+      toast.error("ElevenLabs 配置没有完成");
+    } finally {
+      setConfiguringElevenLabs(false);
     }
   };
 
@@ -138,6 +165,17 @@ export function CliInstallDialog() {
       state?.status === "error" ||
       state?.status === "unsupported" ||
       needsManualPath);
+  const elevenLabs = state?.elevenLabs;
+  const elevenLabsReady =
+    elevenLabs?.runtime === "available" && elevenLabs.credential === "configured";
+  const skillLabel =
+    state?.skill?.status === "ready"
+      ? "Codex + Claude 已就绪"
+      : state?.skill?.status === "conflict"
+        ? "已有 Skill 冲突"
+        : state?.skill?.status === "update-needed"
+          ? "待更新"
+          : "待安装";
 
   return (
     <Dialog
@@ -219,14 +257,80 @@ export function CliInstallDialog() {
                   <code className="truncate">{state.installPath}</code>
                 </div>
               ) : null}
+              {state?.skill ? (
+                <div className="mt-1.5 flex items-center gap-2 text-[11px] text-zinc-500">
+                  <span className="shrink-0">AI 视频 Skill</span>
+                  <code className="truncate">{skillLabel}</code>
+                </div>
+              ) : null}
             </div>
+
+            {isInstalled && elevenLabs ? (
+              <div className="rounded-lg border border-white/8 bg-white/[0.025] p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <AudioWaveform className="size-3.5 shrink-0 text-[#ff5b97]" />
+                    <span className="text-xs font-medium text-zinc-200">AI 背景音（默认音效）</span>
+                  </div>
+                  <span
+                    className={cn(
+                      "text-[11px] font-medium",
+                      elevenLabsReady
+                        ? "text-emerald-300"
+                        : elevenLabs.runtime === "missing"
+                          ? "text-red-300"
+                          : "text-amber-300",
+                    )}
+                  >
+                    {elevenLabsReady
+                      ? "已配置（运行时验证）"
+                      : elevenLabs.runtime === "missing"
+                        ? "MCP 缺失"
+                        : "未填写 Key"}
+                  </span>
+                </div>
+                <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+                  {elevenLabs.runtime === "missing"
+                    ? "当前客户端没有携带完整的 ElevenLabs MCP，请更新或修复安装。"
+                    : elevenLabsReady
+                      ? "Key 已保存在本机；生成时由官方 MCP 实际验证，并默认合成匹配的环境音效。"
+                      : "Key 可选；跳过后视频 CLI 仍可使用，但 AI 音效和显式 Music 生成不可用。"}
+                </p>
+                {elevenLabs.runtime === "available" ? (
+                  <div className="mt-3 flex items-center justify-between gap-3">
+                    <code className="min-w-0 truncate text-[10px] text-zinc-600">
+                      ~/.config/littlestart/secrets.env
+                    </code>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={configuringElevenLabs}
+                      onClick={() => void configureElevenLabs()}
+                    >
+                      {configuringElevenLabs ? (
+                        <Loader2 className="size-3.5 animate-spin" />
+                      ) : (
+                        <KeyRound className="size-3.5" />
+                      )}
+                      {configuringElevenLabs
+                        ? "等待本地输入…"
+                        : elevenLabsReady
+                          ? "更新 Key"
+                          : "填写 Key"}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
 
             {state?.status === "conflict" || state?.errorCode === "APP_NOT_STABLE" ? (
               <div className="flex gap-2 rounded-lg border border-amber-400/15 bg-amber-400/[0.06] p-3 text-[11px] leading-relaxed text-amber-100/70">
                 <CircleAlert className="mt-0.5 size-3.5 shrink-0 text-amber-300" />
                 <span>
                   {state.status === "conflict"
-                    ? "为保护你已有的命令，安装器不会自动覆盖。请先移动或删除该文件，再点击“重新检查”。"
+                    ? state.errorCode === "SKILL_INSTALL_CONFLICT"
+                      ? "为保护你已有或修改过的 generate-video Skill，安装器不会自动覆盖。请先备份并移动冲突目录，再点击“重新检查”。"
+                      : "为保护你已有的命令，安装器不会自动覆盖。请先移动或删除该文件，再点击“重新检查”。"
                     : "从安装镜像直接运行时，退出后命令会失效。请先把 App 拖到“应用程序”。"}
                 </span>
               </div>

@@ -22,6 +22,61 @@ function versionOutput(version = VERSION): string {
   });
 }
 
+function capabilitiesOutput(
+  defaultKind = "sound-effect",
+  defaultTool = "text_to_sound_effects",
+): string {
+  return JSON.stringify({
+    protocolVersion: "1",
+    ok: true,
+    command: "capabilities",
+    result: {
+      audioGeneration: {
+        providers: [
+          {
+            id: "elevenlabs",
+            defaultKind,
+            kinds: [
+              { id: "sound-effect", tool: "text_to_sound_effects" },
+              { id: "music", tool: "compose_music" },
+            ],
+            mcp: {
+              tool: defaultTool,
+              tools: ["text_to_sound_effects", "compose_music"],
+            },
+          },
+        ],
+      },
+    },
+  });
+}
+
+function mcpSelfCheckOutput(): string {
+  return JSON.stringify({
+    ok: true,
+    command: "elevenlabs-mcp.self-check",
+    result: {
+      version: "0.11.0",
+      source: "bundled",
+      integrity: "pinned-bundle",
+      toolCount: 27,
+      musicTools: [
+        "compose_music",
+        "create_composition_plan",
+        "upload_music_for_inpainting",
+        "video_to_music",
+      ],
+      soundEffectTools: ["text_to_sound_effects"],
+    },
+  });
+}
+
+function verificationOutput(args: readonly string[]): string {
+  if (args.includes("--littlestart-self-check")) return mcpSelfCheckOutput();
+  if (args.includes("capabilities")) return capabilitiesOutput();
+  return versionOutput();
+}
+
 function execute(file: string, args: string[] = []): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(file, args, { encoding: "utf8" }, (error, stdout, stderr) => {
@@ -51,6 +106,16 @@ async function fixture(
   const cliRoot = path.join(resourcesPath, "cli package's files");
   await fs.mkdir(path.join(cliRoot, "dist"), { recursive: true });
   await fs.mkdir(path.join(cliRoot, "runtime"), { recursive: true });
+  const bundledSkillRoot = path.join(cliRoot, "skills", "generate-video");
+  await fs.mkdir(path.join(bundledSkillRoot, "references"), { recursive: true });
+  const elevenLabsMcpRoot = path.join(
+    resourcesPath,
+    "mcp",
+    "elevenlabs",
+    "darwin-arm64",
+  );
+  await fs.mkdir(elevenLabsMcpRoot, { recursive: true });
+  await fs.mkdir(path.join(elevenLabsMcpRoot, "_internal"));
   await fs.mkdir(homeDir, { recursive: true });
   await fs.writeFile(
     path.join(cliRoot, "package.json"),
@@ -58,11 +123,42 @@ async function fixture(
   );
   await fs.writeFile(path.join(cliRoot, "runtime", "runtime.json"), "{}\n");
   await fs.writeFile(
+    path.join(bundledSkillRoot, "SKILL.md"),
+    "---\nname: generate-video\ndescription: bundled test skill v1\n---\n\n# bundled-v1\n",
+  );
+  await fs.writeFile(
+    path.join(bundledSkillRoot, "references", "workflow.md"),
+    "bundled-v1\n",
+  );
+  await fs.writeFile(
     path.join(cliRoot, "dist", "littlestart.cjs"),
     overrides.validCli === false
       ? "process.stdout.write(JSON.stringify({ok:false})); process.exitCode = 1;\n"
-      : `process.stdout.write(${JSON.stringify(versionOutput())});\n`,
+      : `process.stdout.write(process.argv.includes("capabilities") ? ${JSON.stringify(capabilitiesOutput())} : ${JSON.stringify(versionOutput())});\n`,
     { mode: 0o755 },
+  );
+  await fs.writeFile(
+    path.join(cliRoot, "elevenlabs-mcp-launcher.cjs"),
+    `process.stdout.write(process.argv.includes("--littlestart-self-check") ? ${JSON.stringify(mcpSelfCheckOutput())} : ${JSON.stringify(versionOutput())});\n`,
+    { mode: 0o644 },
+  );
+  await fs.writeFile(
+    path.join(elevenLabsMcpRoot, "elevenlabs-mcp"),
+    "#!/bin/sh\nexit 0\n",
+    { mode: 0o755 },
+  );
+  await fs.writeFile(
+    path.join(elevenLabsMcpRoot, "manifest.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      executable: "elevenlabs-mcp",
+      server: {
+        distribution: "elevenlabs-mcp",
+        version: "0.11.0",
+        sourceCommit: "afc22357432db9e8b33991a83d41906001f6d759",
+        wheelSha256: "814af638d3df2ec9d76ba2aeb1247ffa47f5ed8f8d11f60953b402667e4b172a",
+      },
+    })}\n`,
   );
 
   const options = {
@@ -82,10 +178,15 @@ async function fixture(
     homeDir,
     resourcesPath,
     cliRoot,
+    bundledSkillRoot,
     installer,
     installPath: path.join(homeDir, ".local", "bin", "littlestart"),
     aliasPath: path.join(homeDir, ".local", "bin", "video-gen"),
+    mcpInstallPath: path.join(homeDir, ".local", "bin", "littlestart-elevenlabs-mcp"),
+    elevenLabsMcpExecutable: path.join(elevenLabsMcpRoot, "elevenlabs-mcp"),
     profilePath: path.join(homeDir, ".zprofile"),
+    codexSkillPath: path.join(homeDir, ".codex", "skills", "generate-video"),
+    claudeSkillPath: path.join(homeDir, ".claude", "skills", "generate-video"),
   };
 }
 
@@ -98,19 +199,35 @@ async function installConfirmed(installer: Installer) {
 
 test("installs executable launchers, verifies them, and configures PATH idempotently", async (t) => {
   const ctx = await fixture(t);
-  assert.equal((await ctx.installer.getState()).status, "not-installed");
+  const before = await ctx.installer.getState();
+  assert.equal(before.status, "not-installed");
+  assert.deepEqual(before.elevenLabs, { credential: "missing", runtime: "available" });
 
   const first = await installConfirmed(ctx.installer);
   assert.equal(first.ok, true);
   assert.equal(first.state.status, "installed");
   assert.equal(first.state.installedVersion, VERSION);
   assert.equal(first.state.pathConfigured, true);
+  assert.equal(first.state.skill?.status, "ready");
 
-  for (const launcher of [ctx.installPath, ctx.aliasPath]) {
+  for (const skillPath of [ctx.codexSkillPath, ctx.claudeSkillPath]) {
+    assert.match(await fs.readFile(path.join(skillPath, "SKILL.md"), "utf8"), /bundled-v1/);
+    assert.match(
+      await fs.readFile(path.join(skillPath, ".littlestart-managed.json"), "utf8"),
+      /littlestart-electron/,
+    );
+  }
+
+  for (const launcher of [ctx.installPath, ctx.aliasPath, ctx.mcpInstallPath]) {
     const stat = await fs.stat(launcher);
     assert.equal(stat.mode & 0o777, 0o755);
     const content = await fs.readFile(launcher, "utf8");
     assert.match(content, new RegExp(CLI_LAUNCHER_MARKER.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(content, /LITTLESTART_ENV_FILE=/);
+    assert.match(content, /LITTLESTART_ELEVENLABS_MCP_EXECUTABLE=/);
+    assert.match(content, /darwin-arm64\/elevenlabs-mcp'/);
+    assert.doesNotMatch(content, /darwin-arm64\/elevenlabs-mcp\/elevenlabs-mcp/);
+    assert.doesNotMatch(content, /ELEVENLABS_API_KEY=/);
     const executed = JSON.parse((await execute(launcher, ["version", "--json"])).stdout);
     assert.equal(executed.result.version, VERSION);
   }
@@ -119,6 +236,120 @@ test("installs executable launchers, verifies them, and configures PATH idempote
   assert.equal(second.ok, true);
   const profile = await fs.readFile(ctx.profilePath, "utf8");
   assert.equal(profile.split(CLI_PROFILE_START).length - 1, 1);
+});
+
+test("repairs both user-level agent skills when the bundled managed skill is upgraded", async (t) => {
+  const ctx = await fixture(t);
+  assert.equal((await installConfirmed(ctx.installer)).ok, true);
+
+  await fs.writeFile(
+    path.join(ctx.bundledSkillRoot, "SKILL.md"),
+    "---\nname: generate-video\ndescription: bundled test skill v2\n---\n\n# bundled-v2\n",
+  );
+  await fs.writeFile(
+    path.join(ctx.bundledSkillRoot, "references", "workflow.md"),
+    "bundled-v2\n",
+  );
+
+  const before = await ctx.installer.getState();
+  assert.equal(before.status, "repair-needed");
+  assert.equal(before.skill?.status, "update-needed");
+  const repaired = await installConfirmed(ctx.installer);
+  assert.equal(repaired.ok, true);
+  assert.equal(repaired.state.status, "installed");
+  assert.equal(repaired.state.skill?.status, "ready");
+  for (const skillPath of [ctx.codexSkillPath, ctx.claudeSkillPath]) {
+    assert.match(await fs.readFile(path.join(skillPath, "SKILL.md"), "utf8"), /bundled-v2/);
+    assert.equal(
+      await fs.readFile(path.join(skillPath, "references", "workflow.md"), "utf8"),
+      "bundled-v2\n",
+    );
+  }
+});
+
+test("preserves an unmanaged user skill and reports a non-retryable skill conflict", async (t) => {
+  const ctx = await fixture(t);
+  await fs.mkdir(ctx.codexSkillPath, { recursive: true });
+  await fs.writeFile(path.join(ctx.codexSkillPath, "SKILL.md"), "# user-owned skill\n");
+
+  const state = await ctx.installer.getState();
+  assert.equal(state.status, "conflict");
+  assert.equal(state.errorCode, "SKILL_INSTALL_CONFLICT");
+  assert.equal(state.skill?.status, "conflict");
+  assert.equal(state.retryable, false);
+
+  const result = await installConfirmed(ctx.installer);
+  assert.equal(result.ok, false);
+  assert.equal(result.state.errorCode, "SKILL_INSTALL_CONFLICT");
+  assert.equal(
+    await fs.readFile(path.join(ctx.codexSkillPath, "SKILL.md"), "utf8"),
+    "# user-owned skill\n",
+  );
+  assert.equal(await exists(ctx.claudeSkillPath), false);
+  assert.equal(await exists(ctx.installPath), false);
+  assert.equal(await exists(ctx.mcpInstallPath), false);
+});
+
+test("treats a user-modified managed skill as a protected conflict", async (t) => {
+  const ctx = await fixture(t);
+  assert.equal((await installConfirmed(ctx.installer)).ok, true);
+  await fs.appendFile(path.join(ctx.claudeSkillPath, "SKILL.md"), "\nuser customization\n");
+
+  const state = await ctx.installer.getState();
+  assert.equal(state.status, "conflict");
+  assert.equal(state.errorCode, "SKILL_INSTALL_CONFLICT");
+  assert.equal(
+    state.skill?.targets.find((target) => target.agent === "claude")?.status,
+    "conflict",
+  );
+  assert.match(
+    await fs.readFile(path.join(ctx.claudeSkillPath, "SKILL.md"), "utf8"),
+    /user customization/,
+  );
+});
+
+test("refuses to overwrite a foreign ElevenLabs MCP command", async (t) => {
+  const ctx = await fixture(t);
+  const foreign = "#!/bin/sh\necho foreign-elevenlabs-mcp\n";
+  await fs.mkdir(path.dirname(ctx.mcpInstallPath), { recursive: true });
+  await fs.writeFile(ctx.mcpInstallPath, foreign, { mode: 0o755 });
+
+  const state = await ctx.installer.getState();
+  assert.equal(state.status, "conflict");
+  assert.equal(state.errorCode, "EXISTING_COMMAND_CONFLICT");
+  const result = await installConfirmed(ctx.installer);
+  assert.equal(result.ok, false);
+  assert.equal(await fs.readFile(ctx.mcpInstallPath, "utf8"), foreign);
+  assert.equal(await exists(ctx.installPath), false);
+});
+
+test("rolls back the CLI when an ElevenLabs MCP command wins the write race", async (t) => {
+  const foreign = "#!/bin/sh\necho won-elevenlabs-mcp-race\n";
+  const ctx = await fixture(t, {
+    testHooks: {
+      beforeLauncherWrite: async (file) => {
+        if (file.endsWith("/littlestart-elevenlabs-mcp")) {
+          await fs.writeFile(file, foreign, { mode: 0o755 });
+        }
+      },
+    },
+  });
+
+  const result = await installConfirmed(ctx.installer);
+  assert.equal(result.ok, false);
+  assert.equal(result.state.errorCode, "EXISTING_COMMAND_CONFLICT");
+  assert.equal(await exists(ctx.installPath), false);
+  assert.equal(await fs.readFile(ctx.mcpInstallPath, "utf8"), foreign);
+});
+
+test("fails closed when the packaged ElevenLabs MCP runtime is missing", async (t) => {
+  const ctx = await fixture(t);
+  await fs.unlink(ctx.elevenLabsMcpExecutable);
+
+  const state = await ctx.installer.getState();
+  assert.equal(state.status, "error");
+  assert.equal(state.errorCode, "CLI_RUNTIME_MISSING");
+  assert.deepEqual(state.elevenLabs, { credential: "missing", runtime: "missing" });
 });
 
 test("does not touch a shell profile when the install directory is already on PATH", async (t) => {
@@ -295,6 +526,7 @@ test("an alias race fails the whole transaction instead of leaving the primary i
   const result = await installConfirmed(ctx.installer);
   assert.equal(result.ok, false);
   assert.equal(await exists(ctx.installPath), false);
+  assert.equal(await exists(ctx.mcpInstallPath), false);
   assert.equal(await fs.readFile(ctx.aliasPath, "utf8"), foreignAlias);
 });
 
@@ -380,7 +612,7 @@ test("repairs a managed launcher that lost its executable bit", async (t) => {
   assert.equal((await fs.stat(ctx.installPath)).mode & 0o777, 0o755);
 });
 
-test("rolls back both launchers when the installed CLI fails verification", async (t) => {
+test("rolls back all launchers when the installed CLI fails verification", async (t) => {
   const ctx = await fixture(t, { validCli: false });
   const result = await installConfirmed(ctx.installer);
   assert.equal(result.ok, false);
@@ -388,7 +620,40 @@ test("rolls back both launchers when the installed CLI fails verification", asyn
   assert.equal(result.state.errorCode, "VERIFY_FAILED");
   assert.equal(await exists(ctx.installPath), false);
   assert.equal(await exists(ctx.aliasPath), false);
+  assert.equal(await exists(ctx.mcpInstallPath), false);
   assert.equal(await exists(ctx.profilePath), false);
+  assert.equal(await exists(ctx.codexSkillPath), false);
+  assert.equal(await exists(ctx.claudeSkillPath), false);
+});
+
+test("restores the previous managed skills when a repaired CLI later fails verification", async (t) => {
+  const ctx = await fixture(t);
+  assert.equal((await installConfirmed(ctx.installer)).ok, true);
+  await fs.writeFile(
+    path.join(ctx.bundledSkillRoot, "SKILL.md"),
+    "---\nname: generate-video\ndescription: bundled test skill v2\n---\n\n# bundled-v2\n",
+  );
+
+  const failing = createDesktopCliInstaller({
+    supported: true,
+    homeDir: ctx.homeDir,
+    shellPath: "/bin/zsh",
+    pathEnv: "/usr/bin:/bin",
+    appExecutable: process.execPath,
+    resourcesPath: ctx.resourcesPath,
+    cliRoot: ctx.cliRoot,
+    runExecutable: async () => {
+      throw new Error("verification failed after managed skill upgrade");
+    },
+  });
+  const result = await installConfirmed(failing);
+  assert.equal(result.ok, false);
+  assert.equal(result.state.errorCode, "VERIFY_FAILED");
+  for (const skillPath of [ctx.codexSkillPath, ctx.claudeSkillPath]) {
+    const content = await fs.readFile(path.join(skillPath, "SKILL.md"), "utf8");
+    assert.match(content, /bundled-v1/);
+    assert.doesNotMatch(content, /bundled-v2/);
+  }
 });
 
 test("leaves an unsafe profile symlink untouched and reports the manual PATH step", async (t) => {
@@ -428,6 +693,50 @@ test("leaves both a moved profile and a swapped-in symlink untouched", async (t)
   assert.equal(await fs.readFile(target, "utf8"), "# attacker target\n");
   assert.equal(await fs.readFile(movedProfile, "utf8"), original);
   assert.equal(await fs.readFile(ctx.profilePath, "utf8"), "# attacker target\n");
+  assert.equal(await exists(ctx.installPath), false);
+});
+
+test("rolls back when the packaged Node-to-MCP launcher self-check fails", async (t) => {
+  const ctx = await fixture(t);
+  await fs.writeFile(
+    path.join(ctx.cliRoot, "elevenlabs-mcp-launcher.cjs"),
+    "process.stdout.write(JSON.stringify({ok:false})); process.exitCode = 1;\n",
+  );
+  const result = await installConfirmed(ctx.installer);
+  assert.equal(result.ok, false);
+  assert.equal(result.state.errorCode, "VERIFY_FAILED");
+  assert.equal(await exists(ctx.installPath), false);
+  assert.equal(await exists(ctx.aliasPath), false);
+  assert.equal(await exists(ctx.mcpInstallPath), false);
+});
+
+test("rolls back when the packaged CLI still defaults to Music", async (t) => {
+  const ctx = await fixture(t);
+  await fs.writeFile(
+    path.join(ctx.cliRoot, "dist", "littlestart.cjs"),
+    `process.stdout.write(process.argv.includes("capabilities") ? ${JSON.stringify(capabilitiesOutput("music", "compose_music"))} : ${JSON.stringify(versionOutput())});\n`,
+  );
+  const result = await installConfirmed(ctx.installer);
+  assert.equal(result.ok, false);
+  assert.equal(result.state.errorCode, "VERIFY_FAILED");
+  assert.equal(await exists(ctx.installPath), false);
+  assert.equal(await exists(ctx.aliasPath), false);
+  assert.equal(await exists(ctx.mcpInstallPath), false);
+});
+
+test("rolls back when the packaged MCP self-check omits the required sound-effect tool", async (t) => {
+  const ctx = await fixture(t);
+  const withoutSoundEffects = JSON.parse(mcpSelfCheckOutput()) as {
+    result: { soundEffectTools?: string[] };
+  };
+  delete withoutSoundEffects.result.soundEffectTools;
+  await fs.writeFile(
+    path.join(ctx.cliRoot, "elevenlabs-mcp-launcher.cjs"),
+    `process.stdout.write(${JSON.stringify(JSON.stringify(withoutSoundEffects))});\n`,
+  );
+  const result = await installConfirmed(ctx.installer);
+  assert.equal(result.ok, false);
+  assert.equal(result.state.errorCode, "VERIFY_FAILED");
   assert.equal(await exists(ctx.installPath), false);
 });
 
@@ -766,10 +1075,10 @@ test("deduplicates rapid repeated install requests", async (t) => {
   });
   let runs = 0;
   const ctx = await fixture(t, {
-    runExecutable: async () => {
+    runExecutable: async (_executable, args) => {
       runs += 1;
       await gate;
-      return { stdout: versionOutput(), stderr: "" };
+      return { stdout: verificationOutput(args), stderr: "" };
     },
   });
 
@@ -783,7 +1092,7 @@ test("deduplicates rapid repeated install requests", async (t) => {
   release();
   assert.equal((await first).ok, true);
   assert.equal((await second).ok, true);
-  assert.equal(runs, 1);
+  assert.equal(runs, 3);
 });
 
 test("serializes installers from separate desktop processes with a user-level lock", async (t) => {
@@ -793,10 +1102,10 @@ test("serializes installers from separate desktop processes with a user-level lo
   });
   let verifying = false;
   const ctx = await fixture(t, {
-    runExecutable: async () => {
+    runExecutable: async (_executable, args) => {
       verifying = true;
       await gate;
-      return { stdout: versionOutput(), stderr: "" };
+      return { stdout: verificationOutput(args), stderr: "" };
     },
   });
   const second = createDesktopCliInstaller({
@@ -849,10 +1158,10 @@ test("a stale-lock reclaimer and the old owner never remove a fresh successor le
   });
   let verifying = false;
   const ctx = await fixture(t, {
-    runExecutable: async () => {
+    runExecutable: async (_executable, args) => {
       verifying = true;
       await gate;
-      return { stdout: versionOutput(), stderr: "" };
+      return { stdout: verificationOutput(args), stderr: "" };
     },
   });
 

@@ -8,9 +8,10 @@
 
 - 本机读取配置与素材，在本机渲染 MP4 和静帧。
 - 支持严格配置校验、媒体探测、渲染计划、可重现锁文件、缓存管理和可恢复批处理。
+- 支持一键从视频标题、文案和时长规划 BGM，通过随 Electron 打包的官方 ElevenLabs MCP 生成纯器乐或可循环环境音效，再自动写入配置和确定性渲染。
 - 为自动化提供稳定的 JSON 结果与 NDJSON 事件流。
-- 自带 Codex / Claude Code Skill 安装器。
-- 当前不提供云端渲染、远程素材下载、模板市场或第三方模板插件。
+- Electron 点击一次即在同一事务中安装 CLI、ElevenLabs MCP 启动器和 Codex / Claude Code 用户级 Skill；用户自定义的同名 Skill 不会被覆盖。
+- 当前不提供云端渲染、通用远程素材下载、模板市场或第三方模板插件。`produce` 只在背景音准备阶段联网；底层 `render` 始终消费已固化的本地素材。
 
 CLI 与 GUI 共享核心模型，但 CLI 是独立可安装的生产工具，不要求启动 Next.js、Electron 或 GUI。
 
@@ -84,16 +85,17 @@ mkdir my-video && cd my-video
 littlestart init video.json --minimal
 ```
 
-编辑 `video.json` 中的标题和词稿，然后依次预检、看静帧并渲染：
+编辑 `video.json` 中的标题和词稿，然后依次预检、看静帧并一键生产：
 
 ```bash
 littlestart validate video.json
 littlestart plan video.json
 littlestart still video.json --scene all --out-dir preview
-littlestart render video.json --out output/video.mp4 --cover output/cover.jpg
+littlestart produce video.json --bgm auto \
+  --out output/video.mp4 --cover output/cover.jpg
 ```
 
-渲染不会默认覆盖已有产物。确认要替换时显式加 `--force`。成片和封面以临时文件渲染并原子提交；失败或中断不会把半成品冒充成功产物。
+`produce` 会在已配置 Key 时默认通过 ElevenLabs 音效生成接入旁白友好的背景音；未配置时使用现有音频或静音继续出片。最小配置不要覆盖 `opening.countdown`、`opening.curtain` 或 `ending`；标准生产会在付费请求和渲染前拒绝占位文案、不完整/过快的 3-2-1 幕帘、缺失开场音效或被替换/过短/静音的官方片尾。生产不会默认覆盖已有产物。确认要替换时显式加 `--force`。成片和封面以临时文件渲染并原子提交；失败或中断不会把半成品冒充成功产物。
 
 一个常用的最小补丁配置如下。未写字段由模板默认值补齐：
 
@@ -146,6 +148,58 @@ littlestart assets inspect ./assets/music.mp3 --json
 littlestart probe ./assets/clip.mp4 --json
 ```
 
+## 一键生成带 ElevenLabs 背景音的视频
+
+完整视频使用 `produce`，不需要用户分别生成音频、改 JSON、再拼接视频：
+
+```bash
+littlestart produce video.json \
+  --bgm auto \
+  --out output/video.mp4 \
+  --prepared-config output/video.prepared.json \
+  --lock output/video.lock.json \
+  --events ndjson
+```
+
+整个项目未指定 `--audio-kind` 时默认使用 `sound-effect`。CLI 会读取标题和提词文案，推断“空间 + 持续物理声源”，而不是把对白直接交给音效模型。它构造稳定、连续、旁白友好、无音乐/人声/警报/突发瞬态的环境音效 prompt，通过 `text_to_sound_effects` 只生成一次 0.5–5 秒的无缝 MP3，并在正片循环铺满。如果用户没有更具体的声源要求，可以不传 `--bgm-prompt`；航空内容会自动使用涡扇低鸣、通风、航电风扇和机身共鸣，不使用 Mayday 对白或警报。显式方向例如：
+
+```bash
+littlestart produce video.json \
+  --bgm auto \
+  --bgm-prompt "steady commercial airliner cabin ambience, no music, no voices, no alarms" \
+  --out output/video.mp4
+```
+
+只有用户明确要求配乐、曲风、乐器或旋律时，才显式传 `--audio-kind music` 切换到 Music：
+
+```bash
+littlestart produce video.json \
+  --bgm auto \
+  --audio-kind music \
+  --bgm-prompt "warm minimal acoustic texture with gentle optimism" \
+  --out output/video.mp4
+```
+
+Music 模式通过 `compose_music` 生成，并自动加入纯器乐、旁白留白、低到中等能量、稀疏编配、无歌词/人声、可循环结尾以及不模仿可识别作品等约束。两种模式都由 `produce` 自动接入视频，不要求用户手工拼装。Electron 安装 CLI 时会可选提示 Key；跳过不影响安装。也可手动填写：
+
+```text
+~/.config/littlestart/secrets.env
+ELEVENLABS_API_KEY=
+```
+
+进程环境中的 `ELEVENLABS_API_KEY` 优先于该文件。Key 不进入 argv、视频配置、manifest、锁文件、日志或结果；不会隐式切换 Composio 或直连 REST。
+
+- `--audio-kind sound-effect|music`：整个项目默认 `sound-effect`；只有显式传 `music` 才调用 Music。音效不能搭配音乐模型参数。
+- `--bgm auto`：模板内置 BGM 会在有 Key 时升级为新背景音；已有本地/上传 BGM 和显式 `null` 默认保留。缺 Key 时返回 `BGM_GENERATION_SKIPPED` warning，并继续使用现有 BGM 或静音。
+- `--bgm required`：空 BGM 或内置模板 BGM 必须升级为生成音频；显式本地/upload BGM 默认保留，要替换它再加 `--replace-bgm`。缺 Key 返回 `AUTH_REQUIRED`，且不会写文件或发起付费调用。
+- `--bgm off`：关闭自动生成，保留配置中的现有设置。
+- `--replace-bgm`：明确覆盖已有 BGM；只在用户确实要求替换时使用。它属于强制生成意图；若没有同 request key 的已验证缓存，缺 Key 或离线时会失败，不会悄悄保留旧 BGM。
+- `--offline`：不启动 MCP；先复用同 request key 的已验证音频，否则 `auto` 使用已有 BGM/静音继续，无法满足的 `required` 失败。
+
+成功后会保留 MP3、旁路 manifest、prepared config 和 lock，最终使用 lock 渲染。`produce` 只在编码后 MP4 的 H.264/MP4、宽高、fps、总时长和应有音轨与 plan 相符后才原子发布；终态 result 还会返回 `productionGuard`、`scenes`和 `media`，调用方必须验收，不能只看进程退出码或预期路径。manifest 记录声音种类、所请求的 MCP 固定发行版、实际 runtime 来源与完整性、工具、prompt、时长和音频 SHA-256，不记录 Key；只有通过随包校验的 runtime 才记录固定源码提交和 wheel 摘要。同一 request key 的音频会在大小、摘要、时长与音轨验证后复用，因此渲染失败后重跑不会重复扣生成额度。
+
+`audio plan` 和 `audio generate` 仍提供给诊断/高级自动化，但一键视频主路径应使用 `produce`。这两个命令同样默认 `sound-effect`；显式 Music 必须传 `--audio-kind music`。发行前仍需按当前 ElevenLabs 账户计划、用途、地区和所选生成能力的现行条款重新核对授权；音乐还应核对 [Music Terms](https://elevenlabs.io/music-terms)。
+
 ## 命令地图
 
 以下是稳定的命令族；每个命令的精确选项用 `littlestart help <命令>` 查询。
@@ -158,9 +212,12 @@ littlestart probe ./assets/clip.mp4 --json
 | `init` | 生成完整或最小配置 |
 | `validate` | 严格校验配置、字段和素材 |
 | `plan` | 解析时长、帧数、输出规格与本地文件素材，但不渲染 |
+| `produce` | 自动准备/复用音乐或环境音效、写 prepared config 与 lock，并渲染最终视频 |
 | `render` | 渲染 MP4，并可同时输出封面 |
 | `still` | 导出 opening / content / ending 或全部场景静帧 |
 | `probe` | 读取本地媒体元数据与轨道信息 |
+| `audio plan` | 离线规划背景音请求、输出路径与配置补丁，不联网、不扣费 |
+| `audio generate` | 通过官方 ElevenLabs MCP 生成并固化本地音乐/音效（高级用法） |
 | `config schema` | 输出当前模板的 JSON Schema |
 | `config resolve` | 合并默认值，输出完整规范化配置 |
 | `config lock` | 固化配置、模板和素材摘要，生成可重现锁文件 |
@@ -234,9 +291,11 @@ littlestart render video.json --out output/video.mp4 \
 
 完整协议和退出码见 [docs/cli/automation.md](docs/cli/automation.md)。
 
-## 安装 Agent Skill
+## Agent Skill 安装与修复
 
-在项目根目录为 Codex 和 Claude Code 安装随当前 CLI 分发的 Skill：
+Electron 客户端的“安装或修复 CLI”会在同一本地事务中安装命令启动器、ElevenLabs MCP 启动器和 Codex / Claude Code 用户级 `generate-video` Skill，无需用户再手动执行第二步。已被用户修改或未受管的同名 Skill 会保留原样并返回冲突，不会出现部分安装。
+
+以下是开发、诊断或 Electron 外的手动安装方式：
 
 ```bash
 littlestart skill install
