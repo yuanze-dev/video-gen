@@ -146,6 +146,16 @@ test("packaged smoke sends initialize/list only and accepts pinned music plus so
   });
 });
 
+test("packaged smoke resolves a relative executable before changing its working directory", async () => {
+  const lock = JSON.parse(await source("mcp/elevenlabs/lock.json"));
+  await withFakeServer(false, async (executable) => {
+    const relativeExecutable = path.relative(process.cwd(), executable);
+    assert.equal(path.isAbsolute(relativeExecutable), false);
+    const result = await runMcpStdioSmoke(relativeExecutable, lock, { timeoutMs: 5_000 });
+    assert.equal(result.toolCount, 27);
+  });
+});
+
 test("packaged smoke rejects the upstream-style non-JSON stdout banner", async () => {
   const lock = JSON.parse(await source("mcp/elevenlabs/lock.json"));
   await withFakeServer(true, async (executable) => {
