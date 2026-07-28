@@ -22,12 +22,16 @@
 /electron/dist/
 /cli/dist/
 /packages/littlestart-cli/dist/
+/packages/littlestart-cli/elevenlabs-mcp-launcher.cjs
 /packages/littlestart-cli/runtime/
 /packages/littlestart-cli/skills/
 /packages/littlestart-cli/README.md
 /.artifacts/
 /output/
 /.remotion-build/
+/mcp/elevenlabs/.build-*/
+/mcp/elevenlabs/dist/*
+!/mcp/elevenlabs/dist/.gitkeep
 
 # electron-builder output
 /release/
@@ -38,6 +42,8 @@
 !/build/entitlements.mac.plist
 !/build/notarize.cjs
 !/build/verify-cli-resource.cjs
+!/build/verify-encoded-production.cjs
+!/build/countdown-glyph-templates.cjs
 !/build/icon.icns
 !/build/dmg-bg.png
 !/build/dmg-bg@2x.png
@@ -54,6 +60,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+secrets.env
 
 # vercel
 .vercel

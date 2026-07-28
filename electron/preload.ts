@@ -8,6 +8,7 @@ import {
   DESKTOP_UPDATE_CHANNELS,
   type DesktopCliInstallResult,
   type DesktopCliInstallState,
+  type DesktopElevenLabsConfigureResult,
   type DesktopRenderBridge,
   type DesktopUpdateState,
 } from "../lib/desktop-bridge";
@@ -48,6 +49,10 @@ const electronRender = {
   // operations. Older shells omit the flag, so a newly deployed Web UI hides
   // the entry instead of presenting a button that cannot work.
   supportsCliInstall: true as const,
+  // Key entry happens in a native local dialog. This no-argument bridge only
+  // receives configured/missing status; the remote editor never receives the
+  // submitted credential.
+  supportsElevenLabsCredential: true as const,
 
   beginExportSession: (): Promise<
     { ok: true; sessionId: string } | { ok: false; error: string }
@@ -96,6 +101,9 @@ const electronRender = {
 
   installCli: (): Promise<DesktopCliInstallResult> =>
     ipcRenderer.invoke(DESKTOP_CLI_CHANNELS.install),
+
+  configureElevenLabsCredential: (): Promise<DesktopElevenLabsConfigureResult> =>
+    ipcRenderer.invoke(DESKTOP_CLI_CHANNELS.configureElevenLabs),
 } satisfies DesktopRenderBridge;
 
 contextBridge.exposeInMainWorld("electronRender", electronRender);

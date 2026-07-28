@@ -1,6 +1,17 @@
 import { useCurrentFrame, useVideoConfig } from "remotion";
 import { CANVAS, FONT_STACK } from "../../lib/constants";
 
+export function countdownValueAtFrame(
+  frame: number,
+  fps: number,
+  from: number,
+  speed: number,
+): number | null {
+  const sec = (Math.max(0, frame) / fps) * speed;
+  if (sec >= from) return null;
+  return from - Math.floor(sec);
+}
+
 // Shows from, from-1, ... 1 over the first `from / speed` seconds, then disappears.
 // `speed` is a tick-rate multiplier: >1 counts down faster, <1 slower.
 export function Countdown({
@@ -18,9 +29,8 @@ export function Countdown({
 }) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const sec = (frame / fps) * speed;
-  if (sec >= from) return null;
-  const n = from - Math.floor(sec);
+  const n = countdownValueAtFrame(frame, fps, from, speed);
+  if (n === null) return null;
 
   return (
     <div

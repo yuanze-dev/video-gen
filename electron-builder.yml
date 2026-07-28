@@ -87,6 +87,12 @@ extraResources:
   # renderer expect ordinary files, and the launcher can then survive any cwd.
   - from: packages/littlestart-cli
     to: cli
+  # Optional for local packaging; CI/release build it first and make absence
+  # fatal through LITTLESTART_REQUIRE_ELEVENLABS_MCP in afterPack.
+  - from: mcp/elevenlabs/dist
+    to: mcp/elevenlabs
+    filter:
+      - "darwin-arm64/**/*"
 
 asar: true
 # Native binaries must be on the real filesystem to be executed/dlopen'd.

@@ -7,11 +7,34 @@ import path from "node:path";
 import type {
   DesktopCliInstallResult,
   DesktopCliInstallState,
+  DesktopElevenLabsState,
+  DesktopSkillInstallState,
 } from "../lib/desktop-bridge";
+import {
+  getElevenLabsCredentialStatus,
+} from "./elevenlabs-credential-dialog.ts";
+import { resolveLittlestartEnvFile } from "../cli/local-secrets.ts";
+import {
+  beginManagedGenerateVideoSkillInstall,
+  inspectManagedGenerateVideoSkill,
+  ManagedSkillInstallError,
+  type ManagedSkillInspection,
+  type ManagedSkillInstallTransaction,
+} from "../cli/skills.ts";
 
 export const CLI_LAUNCHER_MARKER = "# littlestart-cli-launcher:v1";
 export const CLI_PROFILE_START = "# >>> littlestart CLI >>>";
 export const CLI_PROFILE_END = "# <<< littlestart CLI <<<";
+const ELEVENLABS_MCP_SELF_CHECK_ARG = "--littlestart-self-check";
+const ELEVENLABS_MCP_VERSION = "0.11.0";
+const ELEVENLABS_MCP_EXPECTED_TOOL_COUNT = 27;
+const ELEVENLABS_MCP_MUSIC_TOOLS = [
+  "compose_music",
+  "create_composition_plan",
+  "upload_music_for_inpainting",
+  "video_to_music",
+] as const;
+const ELEVENLABS_MCP_SOUND_EFFECT_TOOLS = ["text_to_sound_effects"] as const;
 
 type RunExecutable = (
   executable: string,
@@ -37,6 +60,10 @@ type CliInstallerOptions = {
     beforeQuarantineCleanup?: (file: string) => Promise<void>;
     beforeFinalStateCheck?: () => Promise<void>;
     beforeStaleLockReclaim?: (createSuccessor: () => Promise<string>) => Promise<void>;
+    afterSkillTargetPublish?: (target: {
+      agent: "codex" | "claude";
+      path: string;
+    }) => Promise<void>;
   };
 };
 
@@ -250,6 +277,16 @@ async function readSnapshotAtPath(
 async function isRegularFile(file: string): Promise<boolean> {
   try {
     return (await fs.lstat(file)).isFile();
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+}
+
+async function isExecutableRegularFile(file: string): Promise<boolean> {
+  try {
+    const stat = await fs.lstat(file);
+    return stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o111) !== 0;
   } catch (error) {
     if (isMissing(error)) return false;
     throw error;
@@ -535,6 +572,31 @@ function isConfirmableStatus(status: DesktopCliInstallState["status"]): boolean 
   return status === "not-installed" || status === "repair-needed" || status === "installed";
 }
 
+function desktopSkillState(inspection: ManagedSkillInspection): DesktopSkillInstallState {
+  return {
+    status:
+      inspection.status === "ready"
+        ? "ready"
+        : inspection.status === "conflict"
+          ? "conflict"
+          : inspection.targets.every((target) => target.status === "missing")
+            ? "missing"
+            : "update-needed",
+    targets: inspection.targets.map((target) => ({
+      agent: target.agent,
+      path: target.path,
+      status:
+        target.status === "current"
+          ? "ready"
+          : target.status === "missing"
+            ? "missing"
+            : target.status === "conflict"
+              ? "conflict"
+              : "update-needed",
+    })),
+  };
+}
+
 async function profileHasManagedPath(
   profilePath: string | null,
   binDir: string,
@@ -615,14 +677,98 @@ function parseVersionOutput(stdout: string, expectedVersion: string): boolean {
   }
 }
 
+function parseCapabilitiesOutput(stdout: string): boolean {
+  try {
+    const value = JSON.parse(stdout) as {
+      ok?: unknown;
+      command?: unknown;
+      result?: {
+        audioGeneration?: {
+          providers?: Array<{
+            id?: unknown;
+            defaultKind?: unknown;
+            kinds?: Array<{ id?: unknown; tool?: unknown }>;
+            mcp?: { tool?: unknown; tools?: unknown };
+          }>;
+        };
+      };
+    };
+    const provider = value.result?.audioGeneration?.providers?.find(
+      (candidate) => candidate.id === "elevenlabs",
+    );
+    const soundEffect = provider?.kinds?.find((kind) => kind.id === "sound-effect");
+    const mcp = provider?.mcp;
+    return (
+      value.ok === true &&
+      value.command === "capabilities" &&
+      provider?.defaultKind === "sound-effect" &&
+      soundEffect?.tool === "text_to_sound_effects" &&
+      mcp?.tool === "text_to_sound_effects" &&
+      Array.isArray(mcp?.tools) &&
+      mcp.tools.includes("text_to_sound_effects")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function parseMcpSelfCheckOutput(stdout: string): boolean {
+  try {
+    const value = JSON.parse(stdout) as {
+      ok?: unknown;
+      command?: unknown;
+      result?: {
+        version?: unknown;
+        source?: unknown;
+        integrity?: unknown;
+        toolCount?: unknown;
+        musicTools?: unknown;
+        soundEffectTools?: unknown;
+      };
+    };
+    const musicTools = Array.isArray(value.result?.musicTools)
+      ? new Set(value.result.musicTools)
+      : null;
+    const soundEffectTools = Array.isArray(value.result?.soundEffectTools)
+      ? new Set(value.result.soundEffectTools)
+      : null;
+    return (
+      value.ok === true &&
+      value.command === "elevenlabs-mcp.self-check" &&
+      value.result?.version === ELEVENLABS_MCP_VERSION &&
+      value.result?.source === "bundled" &&
+      value.result?.integrity === "pinned-bundle" &&
+      value.result?.toolCount === ELEVENLABS_MCP_EXPECTED_TOOL_COUNT &&
+      musicTools !== null &&
+      ELEVENLABS_MCP_MUSIC_TOOLS.every((name) => musicTools.has(name)) &&
+      soundEffectTools !== null &&
+      ELEVENLABS_MCP_SOUND_EFFECT_TOOLS.every((name) => soundEffectTools.has(name))
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function createDesktopCliInstaller(options: CliInstallerOptions) {
   const binDir = path.join(options.homeDir, ".local", "bin");
   const installPath = path.join(binDir, "littlestart");
   const aliasPath = path.join(binDir, "video-gen");
+  const mcpInstallPath = path.join(binDir, "littlestart-elevenlabs-mcp");
   const profilePath = chooseProfile(options.homeDir, options.shellPath);
   const cliEntry = path.join(options.cliRoot, "dist", "littlestart.cjs");
+  const mcpCliEntry = path.join(options.cliRoot, "elevenlabs-mcp-launcher.cjs");
   const packageFile = path.join(options.cliRoot, "package.json");
   const runtimeFile = path.join(options.cliRoot, "runtime", "runtime.json");
+  const skillRoot = path.join(options.cliRoot, "skills", "generate-video");
+  const skillFile = path.join(skillRoot, "SKILL.md");
+  const elevenLabsMcpExecutable = path.join(
+    options.resourcesPath,
+    "mcp",
+    "elevenlabs",
+    "darwin-arm64",
+    "elevenlabs-mcp",
+  );
+  const envFile = resolveLittlestartEnvFile({ homeDir: options.homeDir, env: {} });
   const nodeModulesPath = path.join(options.resourcesPath, "app.asar", "node_modules");
   const compositorPath = path.join(
     options.resourcesPath,
@@ -648,26 +794,50 @@ export function createDesktopCliInstaller(options: CliInstallerOptions) {
     status,
     installPath,
     aliasPath,
+    mcpInstallPath,
     profilePath: profilePath ?? undefined,
   });
 
+  const getElevenLabsState = async (): Promise<DesktopElevenLabsState> => {
+    const [credential, launcherOk, runtimeOk] = await Promise.all([
+      getElevenLabsCredentialStatus(options.homeDir).catch(() => "missing" as const),
+      isRegularFile(mcpCliEntry).catch(() => false),
+      isExecutableRegularFile(elevenLabsMcpExecutable).catch(() => false),
+    ]);
+    return {
+      credential,
+      runtime: launcherOk && runtimeOk ? "available" : "missing",
+    };
+  };
+
   const readBundledVersion = async (): Promise<string> => {
-    const [manifest, entryOk, runtimeOk] = await Promise.all([
+    const [manifest, entryOk, runtimeOk, mcpEntryOk, mcpRuntimeOk, skillOk] = await Promise.all([
       fs.readFile(packageFile, "utf8"),
       isRegularFile(cliEntry),
       isRegularFile(runtimeFile),
+      isRegularFile(mcpCliEntry),
+      isExecutableRegularFile(elevenLabsMcpExecutable),
+      isRegularFile(skillFile),
     ]);
     const value = JSON.parse(manifest) as { version?: unknown };
     if (
       typeof value.version !== "string" ||
       !/^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(value.version) ||
       !entryOk ||
-      !runtimeOk
+      !runtimeOk ||
+      !mcpEntryOk ||
+      !mcpRuntimeOk ||
+      !skillOk
     ) {
       throw new Error("CLI_RUNTIME_MISSING");
     }
     return value.version;
   };
+
+  const commonElevenLabsEnvironment = `export LITTLESTART_ENV_FILE=${shellQuote(envFile)}
+export LITTLESTART_ELEVENLABS_MCP_EXECUTABLE=${shellQuote(elevenLabsMcpExecutable)}
+export LITTLESTART_RESOURCES_PATH=${shellQuote(options.resourcesPath)}
+export LITTLESTART_ELEVENLABS_MCP_BUNDLED=1`;
 
   const launcherContent = (version: string): string => `#!/bin/sh
 ${CLI_LAUNCHER_MARKER}
@@ -676,7 +846,17 @@ export ELECTRON_RUN_AS_NODE=1
 export NODE_PATH=${shellQuote(nodeModulesPath)}
 export REMOTION_BINARIES_DIR=${shellQuote(compositorPath)}
 export REMOTION_BROWSER_EXECUTABLE=${shellQuote(browserPath)}
+${commonElevenLabsEnvironment}
 exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
+`;
+
+  const mcpLauncherContent = (version: string): string => `#!/bin/sh
+${CLI_LAUNCHER_MARKER}
+# littlestart-cli-version:${version}
+export ELECTRON_RUN_AS_NODE=1
+export NODE_PATH=${shellQuote(nodeModulesPath)}
+${commonElevenLabsEnvironment}
+exec ${shellQuote(options.appExecutable)} ${shellQuote(mcpCliEntry)} "$@"
 `;
 
   const inspectLauncher = async (
@@ -700,9 +880,11 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
 
   const getState = async (): Promise<DesktopCliInstallState> => {
     if (installingState) return installingState;
+    const elevenLabs = await getElevenLabsState();
     if (!options.supported) {
       return {
         ...baseState("unsupported"),
+        elevenLabs,
         errorCode: "UNSUPPORTED_PLATFORM",
         message: "请在已安装到 Mac 的正式桌面版中使用一键安装。",
         retryable: false,
@@ -715,6 +897,7 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
     ) {
       return {
         ...baseState("error"),
+        elevenLabs,
         errorCode: "APP_NOT_STABLE",
         message: "请先把小音符起号助手拖入“应用程序”，再安装 CLI。",
         retryable: false,
@@ -724,16 +907,26 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
     try {
       const bundledVersion = await readBundledVersion();
       const expectedContent = launcherContent(bundledVersion);
-      const [primary, alias, managedProfile] = await Promise.all([
+      const expectedMcpContent = mcpLauncherContent(bundledVersion);
+      const [primary, alias, mcp, managedProfile, skillInspection] = await Promise.all([
         inspectLauncher(installPath, expectedContent),
         inspectLauncher(aliasPath, expectedContent),
+        inspectLauncher(mcpInstallPath, expectedMcpContent),
         profileHasManagedPath(profilePath, binDir),
+        inspectManagedGenerateVideoSkill({
+          sourceDir: skillRoot,
+          homeDir: options.homeDir,
+          target: "both",
+        }),
       ]);
       const pathConfigured = pathContains(options.pathEnv, binDir) || managedProfile;
+      const skill = desktopSkillState(skillInspection);
 
       if (primary.kind === "conflict") {
         return {
           ...baseState("conflict"),
+          elevenLabs,
+          skill,
           bundledVersion,
           pathConfigured,
           errorCode: "EXISTING_COMMAND_CONFLICT",
@@ -742,10 +935,45 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
         };
       }
 
-      if (primary.kind === "current") {
+      if (mcp.kind === "conflict") {
+        return {
+          ...baseState("conflict"),
+          elevenLabs,
+          skill,
+          bundledVersion,
+          pathConfigured,
+          errorCode: "EXISTING_COMMAND_CONFLICT",
+          message: `${mcpInstallPath} 已存在且不属于小音符，未进行覆盖。`,
+          retryable: false,
+        };
+      }
+
+      if (skill.status === "conflict") {
+        const paths = skill.targets
+          .filter((target) => target.status === "conflict")
+          .map((target) => target.path);
+        return {
+          ...baseState("conflict"),
+          elevenLabs,
+          skill,
+          bundledVersion,
+          pathConfigured,
+          errorCode: "SKILL_INSTALL_CONFLICT",
+          message: `generate-video Skill 已存在且不属于当前受管版本，未进行覆盖：${paths.join("、")}。`,
+          retryable: false,
+        };
+      }
+
+      if (
+        primary.kind === "current" &&
+        mcp.kind === "current" &&
+        skill.status === "ready"
+      ) {
         const aliasConflict = alias.kind === "conflict";
         return {
           ...baseState("installed"),
+          elevenLabs,
+          skill,
           bundledVersion,
           installedVersion: bundledVersion,
           pathConfigured,
@@ -761,25 +989,34 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
       const installedVersion =
         primary.kind === "managed-stale"
           ? primary.version ?? undefined
-          : alias.kind === "managed-stale" || alias.kind === "current"
-            ? alias.version ?? undefined
-            : undefined;
+          : mcp.kind === "managed-stale" || mcp.kind === "current"
+            ? mcp.version ?? undefined
+            : alias.kind === "managed-stale" || alias.kind === "current"
+              ? alias.version ?? undefined
+              : undefined;
       const notInstalled =
         primary.kind === "missing" &&
-        (alias.kind === "missing" || alias.kind === "conflict");
+        mcp.kind === "missing" &&
+        (alias.kind === "missing" || alias.kind === "conflict") &&
+        skill.status === "missing";
       return {
         ...baseState(notInstalled ? "not-installed" : "repair-needed"),
+        elevenLabs,
+        skill,
         bundledVersion,
         installedVersion,
         pathConfigured,
         message: notInstalled
-          ? "安装后可在 Codex、Claude Code 或终端中直接生产视频。"
-          : "启动器不完整或来自旧版本，可以安全修复。",
+          ? "安装后会同时配置 CLI、ElevenLabs MCP 和 Codex/Claude 视频 Skill。"
+          : skill.status !== "ready"
+            ? "CLI 或 generate-video Skill 不完整，可以安全修复。"
+            : "启动器不完整或来自旧版本，可以安全修复。",
         retryable: true,
       };
     } catch {
       return {
         ...baseState("error"),
+        elevenLabs,
         errorCode: "CLI_RUNTIME_MISSING",
         message: "桌面版没有携带完整的 CLI，请更新或重新安装桌面版。",
         retryable: false,
@@ -788,17 +1025,25 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
   };
 
   const fingerprintState = async (state: DesktopCliInstallState): Promise<string> => {
-    const files = await Promise.all([
+    const [files, skillInspection] = await Promise.all([
+      Promise.all([
       fingerprintFile(installPath, MAX_LAUNCHER_BYTES),
       fingerprintFile(aliasPath, MAX_LAUNCHER_BYTES),
+      fingerprintFile(mcpInstallPath, MAX_LAUNCHER_BYTES),
       profilePath
         ? fingerprintFile(profilePath, MAX_PROFILE_BYTES)
         : Promise.resolve({ kind: "none" }),
       fingerprintFile(packageFile, MAX_LAUNCHER_BYTES),
+      ]),
+      inspectManagedGenerateVideoSkill({
+        sourceDir: skillRoot,
+        homeDir: options.homeDir,
+        target: "both",
+      }).catch(() => ({ status: "unavailable" as const })),
     ]);
     return crypto
       .createHash("sha256")
-      .update(JSON.stringify({ state, files }))
+      .update(JSON.stringify({ state, files, skillInspection }))
       .digest("hex");
   };
 
@@ -1084,6 +1329,8 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
       const busy = error instanceof Error && error.message === "INSTALL_BUSY";
       const state: DesktopCliInstallState = {
         ...baseState("error"),
+        elevenLabs: initial.elevenLabs,
+        skill: initial.skill,
         bundledVersion: initial.bundledVersion,
         installedVersion: initial.installedVersion,
         pathConfigured: initial.pathConfigured,
@@ -1114,6 +1361,7 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
 
       const bundledVersion = before.bundledVersion ?? (await readBundledVersion());
       const expectedContent = launcherContent(bundledVersion);
+      const expectedMcpContent = mcpLauncherContent(bundledVersion);
       const managedPathPlan = await planManagedPath(profilePath, binDir, options.pathEnv);
       if ((await fingerprintState(before)) !== plan.fingerprint) {
         const state: DesktopCliInstallState = {
@@ -1126,23 +1374,28 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
       }
       installingState = {
         ...baseState("installing"),
+        elevenLabs: before.elevenLabs,
+        skill: before.skill,
         bundledVersion,
         installedVersion: before.installedVersion,
         pathConfigured: before.pathConfigured,
-        message: "正在写入启动器并验证运行环境…",
+        message: "正在安装 CLI、MCP 和 Codex/Claude 视频 Skill…",
         retryable: false,
       };
 
       let primaryBackup: LauncherBackup = null;
       let aliasBackup: LauncherBackup = null;
+      let mcpBackup: LauncherBackup = null;
       let aliasWritable = true;
       const launcherReceipts: LauncherMutationReceipt[] = [];
       let profileMutation: ProfileMutationReceipt | undefined;
+      let skillTransaction: ManagedSkillInstallTransaction | undefined;
 
       try {
-        // Back up both targets before the first write. If a foreign command
+        // Back up every managed target before the first write. If a foreign command
         // appears between the state check and here, fail without touching it.
         primaryBackup = await backup(installPath);
+        mcpBackup = await backup(mcpInstallPath);
         try {
           aliasBackup = await backup(aliasPath);
         } catch (error) {
@@ -1161,6 +1414,14 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
         };
         launcherReceipts.push(primaryReceipt);
         await publishLauncher(primaryReceipt, expectedContent);
+        const mcpReceipt: LauncherMutationReceipt = {
+          file: mcpInstallPath,
+          previous: mcpBackup,
+          quarantinePath: null,
+          published: null,
+        };
+        launcherReceipts.push(mcpReceipt);
+        await publishLauncher(mcpReceipt, expectedMcpContent);
         if (aliasWritable) {
           const aliasReceipt: LauncherMutationReceipt = {
             file: aliasPath,
@@ -1172,6 +1433,33 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
           await publishLauncher(aliasReceipt, expectedContent);
         }
 
+        skillTransaction = await beginManagedGenerateVideoSkillInstall({
+          sourceDir: skillRoot,
+          homeDir: options.homeDir,
+          target: "both",
+          testHooks: options.testHooks?.afterSkillTargetPublish
+            ? {
+                afterTargetPublish: (target) =>
+                  options.testHooks?.afterSkillTargetPublish?.({
+                    agent: target.agent,
+                    path: target.path,
+                  }) ?? Promise.resolve(),
+              }
+            : undefined,
+        });
+        if (!(await skillTransaction.verify())) throw new Error("SKILL_VERIFY_FAILED");
+
+        const verificationEnvironment: NodeJS.ProcessEnv = {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: "1",
+          NODE_PATH: nodeModulesPath,
+          REMOTION_BINARIES_DIR: compositorPath,
+          REMOTION_BROWSER_EXECUTABLE: browserPath,
+          LITTLESTART_ENV_FILE: envFile,
+          LITTLESTART_ELEVENLABS_MCP_EXECUTABLE: elevenLabsMcpExecutable,
+          LITTLESTART_RESOURCES_PATH: options.resourcesPath,
+          LITTLESTART_ELEVENLABS_MCP_BUNDLED: "1",
+        };
         const { stdout } = await runExecutable(options.appExecutable, [
           cliEntry,
           "version",
@@ -1179,18 +1467,41 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
         ], {
           cwd: options.homeDir,
           timeoutMs: VERIFY_TIMEOUT_MS,
-          env: {
-            ...process.env,
-            ELECTRON_RUN_AS_NODE: "1",
-            NODE_PATH: nodeModulesPath,
-            REMOTION_BINARIES_DIR: compositorPath,
-            REMOTION_BROWSER_EXECUTABLE: browserPath,
-          },
+          env: verificationEnvironment,
         });
         if (!parseVersionOutput(stdout, bundledVersion)) throw new Error("VERIFY_FAILED");
         if (!(await Promise.all(launcherReceipts.map(launcherIsPublished))).every(Boolean)) {
           throw new Error("EXISTING_COMMAND_CONFLICT");
         }
+        if (!(await skillTransaction.verify())) throw new Error("SKILL_VERIFY_FAILED");
+        const capabilitiesCheck = await runExecutable(options.appExecutable, [
+          cliEntry,
+          "capabilities",
+          "--json",
+        ], {
+          cwd: options.homeDir,
+          timeoutMs: VERIFY_TIMEOUT_MS,
+          env: verificationEnvironment,
+        });
+        if (!parseCapabilitiesOutput(capabilitiesCheck.stdout)) throw new Error("VERIFY_FAILED");
+        if (!(await Promise.all(launcherReceipts.map(launcherIsPublished))).every(Boolean)) {
+          throw new Error("EXISTING_COMMAND_CONFLICT");
+        }
+        if (!(await skillTransaction.verify())) throw new Error("SKILL_VERIFY_FAILED");
+        const mcpCheck = await runExecutable(
+          options.appExecutable,
+          [mcpCliEntry, ELEVENLABS_MCP_SELF_CHECK_ARG],
+          {
+            cwd: options.homeDir,
+            timeoutMs: VERIFY_TIMEOUT_MS,
+            env: verificationEnvironment,
+          },
+        );
+        if (!parseMcpSelfCheckOutput(mcpCheck.stdout)) throw new Error("VERIFY_FAILED");
+        if (!(await Promise.all(launcherReceipts.map(launcherIsPublished))).every(Boolean)) {
+          throw new Error("EXISTING_COMMAND_CONFLICT");
+        }
+        if (!(await skillTransaction.verify())) throw new Error("SKILL_VERIFY_FAILED");
 
         if (managedPathPlan.needsPublish) {
           if (!profilePath) throw new Error("VERIFY_FAILED");
@@ -1219,23 +1530,33 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
         if (profileMutation && !(await profileIsPublished(profileMutation))) {
           throw new Error("EXISTING_COMMAND_CONFLICT");
         }
+        if (!(await skillTransaction.verify())) throw new Error("SKILL_VERIFY_FAILED");
         const commitResults = await Promise.all([
           ...launcherReceipts.map(commitLauncher),
           ...(profileMutation ? [commitProfile(profileMutation)] : []),
         ]);
+        const skillCommit = await skillTransaction.commit();
         const recoveryPaths = commitResults
           .filter((result) => !result.ok && result.recoveryPath)
           .map((result) => result.recoveryPath as string);
+        recoveryPaths.push(...skillCommit.retainedPaths);
+        const uniqueRecoveryPaths = [...new Set(recoveryPaths)];
         const messages = [managedPathPlan.warning ?? installed.message];
-        if (recoveryPaths.length > 0) {
+        if (uniqueRecoveryPaths.length > 0) {
           messages.push(
-            `未能确认旧文件恢复副本的清理状态，请检查：${recoveryPaths.join("、")}。`,
+            `未能确认旧文件恢复副本的清理状态，请检查：${uniqueRecoveryPaths.join("、")}。`,
           );
         }
         const state = { ...installed, message: messages.filter(Boolean).join(" ") };
         return { ok: true, state };
       } catch (error) {
         const rollbackResults: Array<{ file: string; outcome: MutationOutcome }> = [];
+        if (skillTransaction) {
+          rollbackResults.push({
+            file: "generate-video Skill",
+            outcome: await skillTransaction.rollback(),
+          });
+        }
         if (profileMutation) {
           rollbackResults.push({
             file: profileMutation.file,
@@ -1249,30 +1570,51 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
           });
         }
         installingState = null;
+        const observedAfterRollback = await getState().catch(() => before);
+        const skillRollbackFailed =
+          error instanceof ManagedSkillInstallError && error.code === "ROLLBACK_FAILED";
         const rollbackFailedPaths = rollbackResults
           .filter((result) => !result.outcome.ok)
           .map((result) => result.file);
+        if (skillRollbackFailed) rollbackFailedPaths.push("generate-video Skill");
         const retainedPaths = [
-          ...new Set(rollbackResults.flatMap((result) => result.outcome.retainedPaths)),
+          ...new Set([
+            ...rollbackResults.flatMap((result) => result.outcome.retainedPaths),
+            ...(error instanceof ManagedSkillInstallError ? error.paths : []),
+          ]),
         ];
         const rollbackFailed = rollbackFailedPaths.length > 0;
-        const conflict = error instanceof Error && error.message === "EXISTING_COMMAND_CONFLICT";
+        const commandConflict =
+          error instanceof Error && error.message === "EXISTING_COMMAND_CONFLICT";
+        const skillConflict =
+          error instanceof ManagedSkillInstallError &&
+          error.code === "SKILL_INSTALL_CONFLICT";
+        const conflict = commandConflict || skillConflict;
+        const completeRollbackFailed = rollbackFailed || skillRollbackFailed;
         const state: DesktopCliInstallState = {
           ...baseState(conflict ? "conflict" : "error"),
+          elevenLabs: before.elevenLabs,
+          skill: observedAfterRollback.skill ?? before.skill,
           bundledVersion,
           installedVersion: before.installedVersion,
           pathConfigured: before.pathConfigured,
-          errorCode: rollbackFailed
+          errorCode: completeRollbackFailed
             ? "ROLLBACK_FAILED"
-            : conflict
-              ? "EXISTING_COMMAND_CONFLICT"
-              : "VERIFY_FAILED",
-          message: rollbackFailed
+            : skillConflict
+              ? "SKILL_INSTALL_CONFLICT"
+              : commandConflict
+                ? "EXISTING_COMMAND_CONFLICT"
+                : "VERIFY_FAILED",
+          message: completeRollbackFailed
             ? `CLI 自检失败，且无法安全恢复 ${rollbackFailedPaths.join("、")}。安装器没有覆盖后来出现的文件，请手动检查${retainedPaths.length > 0 ? `：${retainedPaths.join("、")}` : ""}。`
-            : conflict
-              ? "检测到同名命令在安装期间发生变化，未进行覆盖。"
-              : "CLI 自检失败，已撤销本次安装。请重试或更新桌面版。",
-          retryable: !conflict && !rollbackFailed,
+            : skillConflict
+              ? error.message
+              : commandConflict
+                ? "检测到同名命令在安装期间发生变化，未进行覆盖。"
+                : error instanceof ManagedSkillInstallError
+                  ? "generate-video Skill 安装失败，已撤销本次安装。请重试或更新桌面版。"
+                  : "CLI 自检失败，已撤销本次安装。请重试或更新桌面版。",
+          retryable: !conflict && !completeRollbackFailed,
         };
         return { ok: false, error: state.message ?? "CLI 安装失败", state };
       }
@@ -1291,5 +1633,5 @@ exec ${shellQuote(options.appExecutable)} ${shellQuote(cliEntry)} "$@"
     return installInFlight;
   };
 
-  return { getState, prepareInstall, install };
+  return { getState, getElevenLabsState, prepareInstall, install };
 }

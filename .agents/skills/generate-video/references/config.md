@@ -41,6 +41,8 @@ littlestart config resolve video.json --json
 
 不要用 `resolve` 的完整输出替代易读源配置，除非流水线明确要求冻结全部默认值。
 
+标准一键成片中，用户未明确要求改结构时，最小补丁不得包含 `opening.countdown`、`opening.curtain` 或 `ending`。这些字段由当前模板提供完整 3-2-1 幕帘、开场音效以及保留音轨的 FlowPrompter 片尾。`init --minimal` 生成的中文标题/词稿是占位文案，必须替换后才能 `produce`。
+
 ## 素材引用
 
 内置素材：
@@ -82,7 +84,46 @@ littlestart config resolve video.json --json
 }
 ```
 
-把提词器内容切成视频时，不要只改 `mode`。先从 schema 确认当前 `video` 对象结构，再同时提供本地视频并决定是否保留原声。替换片尾时同理，使用 schema 中的 ending 素材槽位。
+完整视频默认让 `produce` 一次完成 BGM 规划、生成、配置落盘、锁定和渲染，不要让用户手工拼音视频：
+
+```bash
+littlestart produce video.json \
+  --bgm auto \
+  --out output/video.mp4 \
+  --prepared-config output/video.prepared.json \
+  --lock output/video.lock.json \
+  --events ndjson
+```
+
+整个项目省略 `--audio-kind` 时默认使用 `sound-effect`。CLI 从标题和提词文案推断环境的持续物理声源，但不会复制或截断对白当作音效内容；它自动追加稳定、连续、旁白友好、无音乐/人声/广播/警报/突发瞬态等约束，只生成一次 0.5–5 秒的无缝 MP3 并在正片循环：
+
+```bash
+littlestart produce video.json \
+  --bgm auto \
+  --out output/video.mp4 \
+  --events ndjson
+```
+
+只有用户给出更具体的环境音方向时才需要 `--bgm-prompt`；内容必须是“空间 + 持续声源”，例如 `modern aircraft cockpit ambience with turbofan hum, ventilation and avionics fans`，不能是台词、故事事件或报警指令。
+
+只有用户明确要求配乐、曲风、乐器或旋律时才显式使用 Music；不能因题材或模糊的“BGM”一词自行切换：
+
+```bash
+littlestart produce video.json \
+  --bgm auto \
+  --audio-kind music \
+  --bgm-prompt "warm minimal acoustic texture with gentle optimism" \
+  --out output/video.mp4 \
+  --events ndjson
+```
+
+默认音效 prompt 应描述稳定的声音来源与空间，并排除音乐、人声、广播、警报和突发瞬态。CLI 通过 `text_to_sound_effects` 生成一次 0.5–5 秒的无缝 MP3，再在正片中循环；不要为了覆盖长视频发起多次生成。显式 Music 通过 `compose_music` 生成，并追加纯器乐、旁白留白、低到中等能量、可循环结尾和不模仿可识别作品等约束。凭据只从 `ELEVENLABS_API_KEY` 或 `~/.config/littlestart/secrets.env` 读取。密钥不能写入 argv、配置、manifest、锁文件、日志或回复。不要使用 Composio 或直连 REST 作为隐式后备。
+
+同一 request key 的 MP3 与 manifest 会先经过摘要、时长和音轨校验；命中后即使缺 Key 或离线也能复用，避免重跑重复扣费。没有可复用缓存时，`--bgm auto` 缺 Key 会保留现有 BGM 或静音继续渲染，并在最终信封返回 warning；`--bgm required` 对空 BGM 或内置模板 BGM 都是生成候选，缺 Key 时零写入失败。已有本地/上传 BGM 默认保留，只有明确要求替换时才加 `--replace-bgm`；该选项表示强制生成意图，无可复用缓存且缺 Key 或离线时必须失败，不能悄悄保留旧 BGM。音乐生成时长限制为 3–600 秒；音效生成时长限制为 0.5–5 秒并默认循环覆盖更长正片。
+
+`audio plan` / `audio generate` 保留给诊断和高级自动化；它们不是最终用户的一键视频主路径。若单独使用，仍必须由调用方把 result 的 `configPatch` 接入配置后再渲染。
+
+把提词器内容切成视频时，不要只改 `mode`。先从 schema 确认当前 `video` 对象结构，再同时提供本地视频并决定是否保留原声。标准一键生产不得替换片尾；只有用户明确要求自定义片尾时，才使用 schema 中的 ending 素材槽位并在 `produce` 上加 `--allow-custom-structure`，且必须实际检查其完整时长和首中末画面。
 
 调整麦克风、设备或屏幕区域时，保持归一化坐标语义，先校验边界，再导出三段静帧进行视觉检查。不要仅凭 JSON 数值判断位置正确。
 

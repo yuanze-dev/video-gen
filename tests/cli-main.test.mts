@@ -4,12 +4,15 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { after, before } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let compiledDirectory = "";
 let cliFile = "";
+let audioModule: typeof import("../cli/audio.ts");
+let produceModule: typeof import("../cli/produce.ts");
+let projectModule: typeof import("../cli/project.ts");
 const temporaryDirectories: string[] = [];
 
 type CommandResult = {
@@ -29,6 +32,9 @@ type JsonEnvelope = {
     runtime?: { template: string; bundleDigest: string };
     offlineLocalRender?: boolean;
     remoteAssets?: boolean;
+    audioGeneration?: {
+      providers?: Array<{ id: string; auth?: { default: string } }>;
+    };
     export?: { resolution: string[] };
     commands?: Array<{ id: string }>;
     templates?: Array<{ ref: string }>;
@@ -99,6 +105,24 @@ before(async () => {
     target: "node20",
     logLevel: "silent",
   });
+  const helperDirectory = path.join(compiledDirectory, "helpers");
+  await build({
+    entryPoints: {
+      audio: path.join(ROOT, "cli", "audio.ts"),
+      produce: path.join(ROOT, "cli", "produce.ts"),
+      project: path.join(ROOT, "cli", "project.ts"),
+    },
+    outdir: helperDirectory,
+    bundle: true,
+    packages: "external",
+    platform: "node",
+    format: "esm",
+    target: "node20",
+    logLevel: "silent",
+  });
+  audioModule = (await import(`${pathToFileURL(path.join(helperDirectory, "audio.js")).href}?t=${Date.now()}`)) as typeof audioModule;
+  produceModule = (await import(`${pathToFileURL(path.join(helperDirectory, "produce.js")).href}?t=${Date.now()}`)) as typeof produceModule;
+  projectModule = (await import(`${pathToFileURL(path.join(helperDirectory, "project.js")).href}?t=${Date.now()}`)) as typeof projectModule;
 });
 
 after(async () => {
@@ -213,6 +237,31 @@ async function writeJson(file: string, value: unknown): Promise<void> {
   await fs.writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+const fakeMcpRuntime = {
+  command: "/fake/elevenlabs-mcp",
+  args: [],
+  source: "bundled",
+  version: "0.11.0",
+  integrity: "pinned-bundle",
+} as const;
+
+async function seedVerifiedAudioCache(
+  plan: ReturnType<typeof audioModule.createAudioGenerationPlan>,
+  configBaseDir: string,
+): Promise<void> {
+  const fixture = await fs.readFile(path.join(ROOT, "public", "assets", "builtin", "airport-bgm.mp3"));
+  await audioModule.generatePlannedAudio({
+    plan,
+    elevenLabsApiKey: "test-secret",
+    runtime: fakeMcpRuntime,
+    configBaseDir,
+    mcpCall: async (request) => {
+      await fs.writeFile(path.join(request.outputDirectory, "cached.mp3"), fixture);
+      return { content: [] };
+    },
+  });
+}
+
 test("version, capabilities, and help expose the production command surface", async () => {
   const cwd = await temporaryDirectory("metadata");
 
@@ -240,6 +289,36 @@ test("version, capabilities, and help expose the production command surface", as
       (command: { id: string }) => command.id === "skill.install",
     ),
   );
+  assert.ok(
+    capabilitiesBody.result?.commands?.some(
+      (command: { id: string }) => command.id === "produce",
+    ),
+  );
+  assert.equal(capabilitiesBody.result?.audioGeneration?.providers?.[0]?.id, "elevenlabs");
+  assert.equal(capabilitiesBody.result?.audioGeneration?.providers?.[0]?.auth?.default, "mcp");
+  const audioProvider = capabilitiesBody.result?.audioGeneration?.providers?.[0] as {
+    defaultKind?: string;
+    defaultModel?: string | null;
+    defaultDurationSec?: number;
+    durationSec?: { min?: number; max?: number };
+    forceInstrumental?: boolean;
+    mcp?: { tool?: string; tools?: string[] };
+    kinds?: Array<{ id?: string; defaultDurationSec?: number }>;
+  } | undefined;
+  assert.equal(audioProvider?.defaultKind, "sound-effect");
+  assert.equal(audioProvider?.defaultModel, null);
+  assert.equal(audioProvider?.defaultDurationSec, 5);
+  assert.deepEqual(audioProvider?.durationSec, { min: 0.5, max: 5 });
+  assert.equal(audioProvider?.forceInstrumental, false);
+  assert.equal(audioProvider?.mcp?.tool, "text_to_sound_effects");
+  assert.deepEqual(
+    audioProvider?.mcp?.tools,
+    ["text_to_sound_effects", "compose_music"],
+  );
+  assert.equal(
+    audioProvider?.kinds?.find((kind) => kind.id === "sound-effect")?.defaultDurationSec,
+    5,
+  );
   assert.equal(capabilitiesBody.result?.templates?.[0]?.ref, "teleprompter@1.0.0");
 
   const help = await runCli(["help", "skill", "install"], { cwd });
@@ -251,6 +330,339 @@ test("version, capabilities, and help expose the production command surface", as
   const shortVersion = await runCli(["-V", "--json"], { cwd });
   assert.equal(shortVersion.code, 0);
   assert.equal(envelope(shortVersion).result?.name, "littlestart");
+});
+
+test("audio plan defaults to sound effects and generation fails closed without auth", async () => {
+  const cwd = await temporaryDirectory("audio-plan");
+  const config = path.join(cwd, "video.json");
+  const output = path.join(cwd, "assets", "bgm.mp3");
+  const manifest = path.join(cwd, "assets", "bgm.manifest.json");
+  await writeJson(config, {
+    content: { teleprompter: { text: { content: "Narration" } } },
+  });
+
+  const planned = await runCli(
+    [
+      "audio",
+      "plan",
+      config,
+      "--prompt",
+      "steady neutral room ambience under narration",
+      "--duration",
+      "5",
+      "--out",
+      output,
+      "--manifest",
+      manifest,
+      "--offline",
+      "--json",
+    ],
+    { cwd },
+  );
+  assert.equal(planned.code, 0);
+  const planResult = envelope(planned).result as unknown as {
+    plan: {
+      kind: string;
+      auth: { mode: string };
+      transport: { tool: string };
+      model: string | null;
+      generationDurationSec: number;
+      generationLoop?: boolean;
+      outputPath: string;
+    };
+    configPatch: { content: { bgm: { asset: { path: string }; volume: number } } };
+  };
+  assert.equal(planResult.plan.auth.mode, "mcp");
+  assert.equal(planResult.plan.kind, "sound-effect");
+  assert.equal(planResult.plan.transport.tool, "text_to_sound_effects");
+  assert.equal(planResult.plan.model, null);
+  assert.equal(planResult.plan.generationDurationSec, 5);
+  assert.equal(planResult.plan.generationLoop, true);
+  assert.equal(planResult.plan.outputPath, output);
+  assert.equal(planResult.configPatch.content.bgm.asset.path, "assets/bgm.mp3");
+  assert.equal(await fs.lstat(output).catch(() => null), null);
+
+  const missingAuth = await runCli(
+    [
+      "audio",
+      "generate",
+      config,
+      "--prompt",
+      "steady neutral room ambience under narration",
+      "--duration",
+      "3",
+      "--out",
+      output,
+      "--manifest",
+      manifest,
+      "--json",
+    ],
+    { cwd, env: { ELEVENLABS_API_KEY: "" } },
+  );
+  assert.equal(missingAuth.code, 5);
+  assert.equal(envelope(missingAuth).error?.code, "AUTH_REQUIRED");
+  assert.equal(await fs.lstat(output).catch(() => null), null);
+  assert.equal(await fs.lstat(manifest).catch(() => null), null);
+
+  const offline = await runCli(
+    [
+      "audio",
+      "generate",
+      config,
+      "--prompt",
+      "steady neutral room ambience under narration",
+      "--offline",
+      "--json",
+    ],
+    { cwd, env: { ELEVENLABS_API_KEY: "test-would-not-be-used" } },
+  );
+  assert.equal(offline.code, 5);
+  assert.equal(envelope(offline).error?.code, "OFFLINE_RESOURCE_MISSING");
+});
+
+test("audio generate reuses a verified request-key cache before offline or credential checks", async () => {
+  const cwd = await temporaryDirectory("audio-cache-before-auth");
+  const config = path.join(cwd, "video.json");
+  const output = path.join(cwd, "assets", "bgm.mp3");
+  const manifest = path.join(cwd, "assets", "bgm.manifest.json");
+  const prompt = "warm minimal instrumental under narration";
+  await writeJson(config, {
+    content: { teleprompter: { text: { content: "Narration" } } },
+  });
+  const loaded = await projectModule.loadProjectInput(config);
+  const videoPlan = projectModule.createRenderPlan(loaded);
+  const plan = audioModule.createAudioGenerationPlan({
+    kind: "music",
+    prompt,
+    contentDurationSec: videoPlan.timeline.content.seconds,
+    generationDurationSec: 34,
+    outputPath: output,
+    manifestPath: manifest,
+    baseDir: loaded.baseDir,
+  });
+  await seedVerifiedAudioCache(plan, loaded.baseDir);
+
+  const result = await runCli(
+    [
+      "audio",
+      "generate",
+      config,
+      "--prompt",
+      prompt,
+      "--audio-kind",
+      "music",
+      "--duration",
+      "34",
+      "--out",
+      output,
+      "--manifest",
+      manifest,
+      "--offline",
+      "--json",
+    ],
+    {
+      cwd,
+      env: {
+        ELEVENLABS_API_KEY: "",
+        LITTLESTART_ENV_FILE: path.join(cwd, "missing-secrets.env"),
+      },
+    },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal((envelope(result).result as { reused?: boolean }).reused, true);
+});
+
+test("produce cache preflight bypasses required offline/auth short-circuit", async () => {
+  const cwd = await temporaryDirectory("produce-cache-before-auth");
+  const config = path.join(cwd, "video.json");
+  const prepared = path.join(cwd, "output", "prepared.json");
+  const lock = path.join(cwd, "output", "video.lock.json");
+  const missingBrowser = path.join(cwd, "missing-chromium");
+  await writeJson(config, {
+    opening: { title: { text: "Cached audio" } },
+    content: { teleprompter: { text: { content: "Narration" } }, bgm: null },
+  });
+  const input = await projectModule.loadProjectInput(config);
+  const planned = produceModule.createProductionAudioPlan({
+    input,
+    mode: "required",
+    audioKind: "music",
+    durationSec: 34,
+    volume: undefined,
+    model: undefined,
+    prompt: undefined,
+  });
+  assert.ok(planned);
+  await seedVerifiedAudioCache(planned.plan, path.dirname(prepared));
+
+  const result = await runCli(
+    [
+      "produce",
+      config,
+      "--bgm",
+      "required",
+      "--audio-kind",
+      "music",
+      "--duration",
+      "34",
+      "--offline",
+      "--prepared-config",
+      prepared,
+      "--lock",
+      lock,
+      "--out",
+      path.join(cwd, "video.mp4"),
+      "--json",
+    ],
+    {
+      cwd,
+      env: {
+        ELEVENLABS_API_KEY: "",
+        LITTLESTART_ENV_FILE: path.join(cwd, "missing-secrets.env"),
+        REMOTION_BROWSER_EXECUTABLE: missingBrowser,
+      },
+    },
+  );
+  // It reaches renderer validation rather than failing as offline/auth: the
+  // cached asset was accepted without reading a usable credential.
+  assert.equal(result.code, 5);
+  assert.equal(envelope(result).error?.code, "DEPENDENCY_MISSING");
+  assert.doesNotMatch(result.stderr, /BGM 生成已被明确请求|--offline 下无法生成/);
+});
+
+test("produce validates its one-click outputs and required credential before browser preparation", async () => {
+  const cwd = await temporaryDirectory("produce-preflight");
+  const config = path.join(cwd, "video.json");
+  const missingBrowser = path.join(cwd, "missing-chromium");
+  await writeJson(config, { content: { bgm: null } });
+
+  const sharedJson = path.join(cwd, "shared.json");
+  const conflicting = await runCli(
+    [
+      "produce",
+      config,
+      "--bgm",
+      "off",
+      "--prepared-config",
+      sharedJson,
+      "--lock",
+      sharedJson,
+      "--out",
+      path.join(cwd, "video.mp4"),
+      "--force",
+      "--json",
+    ],
+    { cwd, env: { REMOTION_BROWSER_EXECUTABLE: missingBrowser } },
+  );
+  assert.equal(conflicting.code, 2);
+  assert.equal(envelope(conflicting).error?.code, "OPTION_CONFLICT");
+  assert.equal(await fs.lstat(sharedJson).catch(() => null), null);
+
+  const required = await runCli(
+    [
+      "produce",
+      config,
+      "--bgm",
+      "required",
+      "--prepared-config",
+      path.join(cwd, "prepared.json"),
+      "--lock",
+      path.join(cwd, "video.lock.json"),
+      "--out",
+      path.join(cwd, "video.mp4"),
+      "--json",
+    ],
+    {
+      cwd,
+      env: {
+        ELEVENLABS_API_KEY: "",
+        LITTLESTART_ENV_FILE: path.join(cwd, "missing-secrets.env"),
+        REMOTION_BROWSER_EXECUTABLE: missingBrowser,
+      },
+    },
+  );
+  assert.equal(required.code, 5);
+  assert.equal(envelope(required).error?.code, "AUTH_REQUIRED");
+  assert.doesNotMatch(required.stderr, /Chromium/);
+  assert.equal(await fs.lstat(path.join(cwd, "prepared.json")).catch(() => null), null);
+  assert.equal(await fs.lstat(path.join(cwd, "video.lock.json")).catch(() => null), null);
+});
+
+test("produce rejects a damaged standard opening before credentials, browser, or outputs", async () => {
+  const cwd = await temporaryDirectory("produce-structure-guard");
+  const config = path.join(cwd, "video.json");
+  const prepared = path.join(cwd, "prepared.json");
+  const lock = path.join(cwd, "video.lock.json");
+  await writeJson(config, {
+    opening: {
+      title: { text: "Pilot emergency practice" },
+      countdown: { enabled: false },
+      curtain: { openDurationSec: 0.4, sfx: null },
+    },
+    content: { teleprompter: { text: { content: "Mayday practice narration" } } },
+  });
+
+  const result = await runCli(
+    [
+      "produce",
+      config,
+      "--bgm",
+      "required",
+      "--prepared-config",
+      prepared,
+      "--lock",
+      lock,
+      "--out",
+      path.join(cwd, "video.mp4"),
+      "--json",
+    ],
+    {
+      cwd,
+      env: {
+        ELEVENLABS_API_KEY: "",
+        LITTLESTART_ENV_FILE: path.join(cwd, "missing-secrets.env"),
+        REMOTION_BROWSER_EXECUTABLE: path.join(cwd, "missing-chromium"),
+      },
+    },
+  );
+
+  assert.equal(result.code, 3);
+  assert.equal(envelope(result).error?.code, "PRODUCTION_GUARD_FAILED");
+  assert.deepEqual(
+    envelope(result).error?.issues?.map((issue) => issue.path),
+    [
+      "opening.countdown.enabled",
+      "opening.curtain.openDurationSec",
+      "opening.curtain.sfx",
+    ],
+  );
+  assert.doesNotMatch(result.stderr, /Chromium|API Key|AUTH_REQUIRED/);
+  assert.equal(await fs.lstat(prepared).catch(() => null), null);
+  assert.equal(await fs.lstat(lock).catch(() => null), null);
+});
+
+test("produce does not read optional credentials when BGM generation is not a candidate", async () => {
+  const cwd = await temporaryDirectory("produce-lazy-credential");
+  const config = path.join(cwd, "video.json");
+  const outside = path.join(cwd, "outside.env");
+  const unsafeSecrets = path.join(cwd, "secrets.env");
+  await writeJson(config, { content: { bgm: null } });
+  await fs.writeFile(outside, "must-not-read\n");
+  await fs.symlink(outside, unsafeSecrets);
+
+  const result = await runCli(
+    ["produce", config, "--bgm", "off", "--out", path.join(cwd, "video.mp4"), "--json"],
+    {
+      cwd,
+      env: {
+        LITTLESTART_ENV_FILE: unsafeSecrets,
+        REMOTION_BROWSER_EXECUTABLE: path.join(cwd, "missing-chromium"),
+      },
+    },
+  );
+  assert.equal(result.code, 5);
+  assert.equal(envelope(result).error?.code, "DEPENDENCY_MISSING");
+  assert.equal(await fs.readFile(outside, "utf8"), "must-not-read\n");
 });
 
 test("skill install arguments are strict before any project mutation", async () => {

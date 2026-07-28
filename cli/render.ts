@@ -60,6 +60,8 @@ export type RenderParams = RenderBaseParams & {
   coverPath?: string;
   /** Existing outputs are rejected unless overwrite is explicitly true. */
   overwrite?: boolean;
+  /** Fail before publication when the workflow promises an audible BGM track. */
+  requireAudioTrack?: boolean;
   onProgress?: (progress: number) => void;
 };
 
@@ -69,6 +71,54 @@ export type RenderOutput = {
   durationSec: number;
   media: MediaProbe;
 };
+
+export function assertRenderedMediaMatchesPlan(
+  media: MediaProbe,
+  expected: {
+    width: number;
+    height: number;
+    fps: number;
+    durationSec: number;
+    requireAudioTrack?: boolean;
+  },
+): void {
+  if (
+    media.videoCodec === null ||
+    media.width === null ||
+    media.height === null ||
+    media.durationSec === null ||
+    media.durationSec <= 0
+  ) {
+    throw new Error("渲染产物校验失败：MP4 缺少有效视频轨或时长");
+  }
+  if (media.videoCodec !== "h264" || media.container !== "mp4") {
+    throw new Error(
+      `渲染产物校验失败：预期 H.264/MP4，实际 ${media.videoCodec}/${media.container}`,
+    );
+  }
+  if (media.width !== expected.width || media.height !== expected.height) {
+    throw new Error(
+      `渲染产物校验失败：预期 ${expected.width}×${expected.height}，实际 ${media.width}×${media.height}`,
+    );
+  }
+  if (media.fps === null || Math.abs(media.fps - expected.fps) > 0.01) {
+    throw new Error(
+      `渲染产物校验失败：预期 ${expected.fps}fps，实际 ${media.fps ?? "未知"}fps`,
+    );
+  }
+  // AAC/container padding can extend the reported container duration slightly
+  // beyond the exact video timeline. Anything beyond this tolerance indicates
+  // a truncated or structurally different export.
+  const durationToleranceSec = Math.max(0.15, 3 / expected.fps);
+  if (Math.abs(media.durationSec - expected.durationSec) > durationToleranceSec) {
+    throw new Error(
+      `渲染产物校验失败：预期约 ${expected.durationSec.toFixed(3)} 秒，实际 ${media.durationSec.toFixed(3)} 秒`,
+    );
+  }
+  if (expected.requireAudioTrack && media.audioCodec === null) {
+    throw new Error("渲染产物校验失败：配置包含开场音效或 BGM，但最终 MP4 缺少音频轨");
+  }
+}
 
 export type StillScene = "opening" | "content" | "ending";
 
@@ -796,7 +846,7 @@ export async function commitArtifactsAtomically(
   await cleanupCommittedTransaction(installed, backups);
 }
 
-function temporaryArtifactPath(target: string, extension: string): string {
+export function temporaryArtifactPath(target: string, extension: string): string {
   const absolute = path.resolve(target);
   const safeBase = path.basename(absolute).replace(/[^A-Za-z0-9._-]/g, "-") || "output";
   return path.join(path.dirname(absolute), `.${safeBase}.${randomId()}.partial${extension}`);
@@ -1080,15 +1130,13 @@ export async function renderVideo(params: RenderParams): Promise<RenderOutput> {
     throwIfAborted(params.signal);
 
     const media = await probeMedia(videoTemporary);
-    if (
-      media.videoCodec === null ||
-      media.width === null ||
-      media.height === null ||
-      media.durationSec === null ||
-      media.durationSec <= 0
-    ) {
-      throw new Error("渲染产物校验失败：MP4 缺少有效视频轨或时长");
-    }
+    assertRenderedMediaMatchesPlan(media, {
+      width: Math.round(prepared.resolved.canvas.width * prepared.scale),
+      height: Math.round(prepared.resolved.canvas.height * prepared.scale),
+      fps: params.options.fps,
+      durationSec,
+      requireAudioTrack: params.requireAudioTrack,
+    });
 
     if (coverTemporary) {
       await prepared.runRenderer(() =>

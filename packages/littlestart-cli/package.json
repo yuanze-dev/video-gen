@@ -6,10 +6,12 @@
   "type": "commonjs",
   "bin": {
     "littlestart": "dist/littlestart.cjs",
-    "video-gen": "dist/littlestart.cjs"
+    "video-gen": "dist/littlestart.cjs",
+    "littlestart-elevenlabs-mcp": "elevenlabs-mcp-launcher.cjs"
   },
   "files": [
     "dist",
+    "elevenlabs-mcp-launcher.cjs",
     "docs",
     "ASSET_RIGHTS.md",
     "THIRD_PARTY_NOTICES.md",
