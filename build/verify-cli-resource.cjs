@@ -461,6 +461,7 @@ function runPackagedCliProductionSmoke({ executable, cliEntry, resources }) {
  */
 function runMcpStdioSmoke(executablePath, lock, options = {}) {
   const timeoutMs = options.timeoutMs ?? 30_000;
+  const resolvedExecutablePath = path.resolve(executablePath);
   const basePath = fs.mkdtempSync(path.join(os.tmpdir(), "littlestart-mcp-smoke-"));
   return new Promise((resolve, reject) => {
     let stdoutBuffer = "";
@@ -470,7 +471,7 @@ function runMcpStdioSmoke(executablePath, lock, options = {}) {
     let settled = false;
     let shutdownTimer = null;
 
-    const child = spawn(executablePath, [], {
+    const child = spawn(resolvedExecutablePath, [], {
       cwd: basePath,
       stdio: ["pipe", "pipe", "pipe"],
       env: {
