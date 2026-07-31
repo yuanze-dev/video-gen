@@ -11,6 +11,7 @@ import type { ProjectConfig } from "../lib/config-schema";
 import { resolveConfig, type ResolvedConfig } from "../lib/resolved";
 import {
   contentFrames,
+  endingFrames,
   openingFrames,
   totalSec,
 } from "../lib/duration";
@@ -126,6 +127,8 @@ export type RenderStillParams = RenderBaseParams & {
   outPath: string;
   scene?: StillScene;
   frame?: number;
+  /** Scene-relative position from 0 to 1. Content defaults to a post-entrance frame. */
+  progress?: number;
   imageFormat?: "jpeg" | "png";
   jpegQuality?: number;
   overwrite?: boolean;
@@ -140,6 +143,8 @@ export type RenderStillOutput = {
 export type RenderSceneStillsParams = RenderBaseParams & {
   outDir: string;
   scenes?: StillScene[];
+  /** Applies the same scene-relative position to each requested scene. */
+  progress?: number;
   imageFormat?: "jpeg" | "png";
   jpegQuality?: number;
   overwrite?: boolean;
@@ -1076,10 +1081,35 @@ function normalizeRenderError(
   return error;
 }
 
-function frameForScene(config: ResolvedConfig, scene: StillScene): number {
-  if (scene === "opening") return 0;
-  if (scene === "content") return openingFrames(config);
-  return openingFrames(config) + contentFrames(config);
+export function frameForScene(
+  config: ResolvedConfig,
+  scene: StillScene,
+  progress?: number,
+): number {
+  const opening = openingFrames(config);
+  const content = contentFrames(config);
+  const start =
+    scene === "opening" ? 0 : scene === "content" ? opening : opening + content;
+  const duration =
+    scene === "opening" ? opening : scene === "content" ? content : endingFrames(config);
+
+  if (progress !== undefined) {
+    if (!Number.isFinite(progress) || progress < 0 || progress > 1) {
+      throw new Error(`静帧场景进度必须在 0 到 1 之间，收到 ${progress}`);
+    }
+    return start + Math.round(Math.max(0, duration - 1) * progress);
+  }
+
+  if (scene !== "content" || duration <= 1) return start;
+  // Device and microphone enter with a spring animation and are transparent on
+  // the exact first content frame. A representative default should show the
+  // settled composition without jumping so far ahead that the script has
+  // already scrolled away.
+  const representativeOffset = Math.min(
+    duration - 1,
+    Math.max(1, Math.min(Math.round(config.canvas.fps * 2), Math.floor(duration * 0.25))),
+  );
+  return start + representativeOffset;
 }
 
 function validateFrame(frame: number, durationInFrames: number): void {
@@ -1180,8 +1210,11 @@ export async function renderVideo(params: RenderParams): Promise<RenderOutput> {
 }
 
 export async function renderStill(params: RenderStillParams): Promise<RenderStillOutput> {
-  if (params.frame !== undefined && params.scene !== undefined) {
-    throw new Error("frame 和 scene 不能同时设置");
+  if (
+    params.frame !== undefined &&
+    (params.scene !== undefined || params.progress !== undefined)
+  ) {
+    throw new Error("frame 不能与 scene 或 progress 同时设置");
   }
   const format = params.imageFormat ??
     (path.extname(params.outPath).toLowerCase() === ".png" ? "png" : "jpeg");
@@ -1195,7 +1228,9 @@ export async function renderStill(params: RenderStillParams): Promise<RenderStil
   try {
     prepared = await prepareRender(params);
     const scene = params.frame === undefined ? (params.scene ?? "opening") : null;
-    const frame = params.frame ?? frameForScene(prepared.resolved, scene ?? "opening");
+    const frame =
+      params.frame ??
+      frameForScene(prepared.resolved, scene ?? "opening", params.progress);
     validateFrame(frame, prepared.composition.durationInFrames);
 
     await prepared.runRenderer(() =>
@@ -1256,7 +1291,7 @@ export async function renderSceneStills(
   try {
     prepared = await prepareRender(params);
     for (const job of jobs) {
-      const frame = frameForScene(prepared.resolved, job.scene);
+      const frame = frameForScene(prepared.resolved, job.scene, params.progress);
       validateFrame(frame, prepared.composition.durationInFrames);
       await prepared.runRenderer(() =>
         prepared!.renderer.renderStill({
@@ -1285,7 +1320,7 @@ export async function renderSceneStills(
     for (const job of jobs) {
       outputs[job.scene] = {
         outputPath: job.artifact.targetPath,
-        frame: frameForScene(prepared.resolved, job.scene),
+        frame: frameForScene(prepared.resolved, job.scene, params.progress),
         scene: job.scene,
       };
     }

@@ -56,6 +56,53 @@ export type PreparedVideoProduction = {
   };
 };
 
+export function createProductionQualitySummary(
+  config: ProjectConfig,
+  audio: PreparedVideoProduction["audio"],
+) {
+  const profile = config.content.device.profile;
+  const separation =
+    config.content.device.transform.y - config.content.mic.transform.y;
+  const layoutRequired =
+    config.content.layout.preset === "stage-mic-above-prompter";
+  const layoutPassed =
+    !layoutRequired ||
+    (profile?.kind === "professional-teleprompter" &&
+      separation + Number.EPSILON >=
+        config.content.layout.minimumVerticalSeparation);
+  return {
+    layout: {
+      passed: layoutPassed,
+      preset: config.content.layout.preset,
+      deviceProfile: profile
+        ? {
+            id: profile.id,
+            kind: profile.kind,
+            aspectRatio: profile.aspectRatio,
+            screenSource: "device-profile" as const,
+          }
+        : {
+            id: null,
+            kind: null,
+            aspectRatio: null,
+            screenSource: "teleprompter-fallback" as const,
+          },
+      microphoneAboveDevice:
+        config.content.mic.transform.y < config.content.device.transform.y,
+      verticalSeparation: separation,
+      minimumVerticalSeparation:
+        config.content.layout.minimumVerticalSeparation,
+    },
+    audioIntent: {
+      passed: true,
+      kind: audio.kind,
+      mode: audio.mode,
+      status: audio.status,
+      requestKey: audio.requestKey,
+    },
+  };
+}
+
 export type PrepareVideoProductionOptions = {
   input: LoadedProjectInput;
   runtime: CliRuntime;
@@ -223,6 +270,24 @@ export function createProductionAudioPlan(options: Pick<
 >) {
   const mode = options.mode ?? "auto";
   if (!isGeneratedCandidate(options.input.config, mode, options.replaceBgm === true)) return null;
+  return createNarrationAudioPlan(options);
+}
+
+export type CreateNarrationAudioPlanOptions = Pick<
+  PrepareVideoProductionOptions,
+  "input" | "durationSec" | "volume" | "audioKind" | "model" | "prompt"
+> & {
+  provider?: "elevenlabs";
+  outputPath?: string;
+  manifestPath?: string;
+};
+
+/**
+ * Canonical narration-aware audio planner shared by `audio plan`,
+ * `audio generate`, and `produce`. Keeping prompt tuning here guarantees the
+ * same intent yields the same request key no matter which workflow executes it.
+ */
+export function createNarrationAudioPlan(options: CreateNarrationAudioPlanOptions) {
   const videoPlan = createRenderPlan(options.input);
   const prompt = tunedPrompt(
     options.input.config,
@@ -234,11 +299,14 @@ export function createProductionAudioPlan(options: Pick<
     prompt,
     plan: createAudioGenerationPlan({
       kind: options.audioKind,
+      provider: options.provider,
       model: options.model,
       prompt,
       contentDurationSec: videoPlan.timeline.content.seconds,
       generationDurationSec: options.durationSec,
       volume: options.volume,
+      outputPath: options.outputPath,
+      manifestPath: options.manifestPath,
       baseDir: options.input.baseDir,
     }),
   };
@@ -336,21 +404,13 @@ export async function prepareVideoProduction(
     assertFreshOutput(lockPath, options.overwrite === true),
   ]);
 
-  const videoPlan = createRenderPlan(options.input, options.exportOptions);
   const shouldGenerate = isGeneratedCandidate(
     options.input.config,
     mode,
     options.replaceBgm === true,
   );
   const plannedAudio = createProductionAudioPlan(options);
-  const prompt = plannedAudio?.prompt ?? (shouldGenerate
-    ? tunedPrompt(
-        options.input.config,
-        options.durationSec ?? videoPlan.timeline.content.seconds,
-        options.prompt,
-        options.audioKind,
-      )
-    : null);
+  const prompt = plannedAudio?.prompt ?? null;
   let generated: AudioGenerationResult | null = null;
   let audio: PreparedVideoProduction["audio"];
 

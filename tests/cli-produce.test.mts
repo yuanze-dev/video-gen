@@ -259,6 +259,65 @@ test("required generates for null or built-in fallback but preserves a local upl
   assert.equal(produce.isGeneratedCandidate(localUpload, "required", true), true);
 });
 
+test("direct audio and one-click production share the tuned prompt and request key", async () => {
+  const directory = await tempDir("shared-audio-plan");
+  const { input } = await sourceProject(directory);
+  const options = {
+    input,
+    audioKind: "music" as const,
+    model: "music_v2" as const,
+    prompt: "restrained cinematic award ceremony score",
+    durationSec: 34,
+    volume: 0.18,
+  };
+  const direct = produce.createNarrationAudioPlan(options);
+  const production = produce.createProductionAudioPlan({
+    ...options,
+    mode: "auto",
+    replaceBgm: false,
+  });
+  assert.ok(production);
+  assert.equal(direct.prompt, production.prompt);
+  assert.equal(direct.plan.requestKey, production.plan.requestKey);
+});
+
+test("production QA records professional geometry and explicit audio intent", async () => {
+  const directory = await tempDir("quality-summary");
+  const { input } = await sourceProject(directory);
+  const config = structuredClone(input.config);
+  config.content.device.profile = {
+    id: "award-stage-prompter-v1",
+    kind: "professional-teleprompter",
+    aspectRatio: 1461 / 1076,
+    screen: { x: 0.196, y: 0.14, w: 0.606, h: 0.314 },
+  };
+  config.content.layout = {
+    preset: "stage-mic-above-prompter",
+    minimumVerticalSeparation: 0.05,
+  };
+  config.content.mic.transform.y = 0.17;
+  config.content.device.transform.y = 0.58;
+  const audio = {
+    kind: "music" as const,
+    mode: "required" as const,
+    status: "generated" as const,
+    reason: "elevenlabs-mcp",
+    prompt: "safe prompt",
+    output: "/tmp/bgm.mp3",
+    manifest: "/tmp/bgm.manifest.json",
+    requestKey: "request-key",
+    reused: false,
+  };
+
+  const summary = produce.createProductionQualitySummary(config, audio);
+  assert.equal(summary.layout.passed, true);
+  assert.equal(summary.layout.deviceProfile.kind, "professional-teleprompter");
+  assert.equal(summary.layout.deviceProfile.screenSource, "device-profile");
+  assert.equal(summary.layout.microphoneAboveDevice, true);
+  assert.equal(summary.audioIntent.kind, "music");
+  assert.equal(summary.audioIntent.requestKey, "request-key");
+});
+
 test("explicit music preparation tunes prompt, calls MCP, wires BGM, and force still reuses it", async () => {
   const directory = await tempDir("mcp");
   const { input } = await sourceProject(directory);

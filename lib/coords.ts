@@ -21,8 +21,12 @@ export function boxFor(
 export const micBox = (t: { x: number; y: number; scale: number }) =>
   boxFor(t, MIC_BASE_W, MIC_ASPECT);
 
-export const deviceBox = (t: { x: number; y: number; scale: number }) =>
-  boxFor(t, DEVICE_BASE_W, DEVICE_ASPECT);
+export const deviceBox = (t: {
+  x: number;
+  y: number;
+  scale: number;
+  aspectRatio?: number;
+}) => boxFor(t, DEVICE_BASE_W, t.aspectRatio ?? DEVICE_ASPECT);
 
 export const deviceSize = (scale: number) => ({
   width: DEVICE_BASE_W * scale,

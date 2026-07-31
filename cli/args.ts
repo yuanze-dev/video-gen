@@ -60,6 +60,7 @@ export interface GlobalCliOptions {
 
 export interface CliCommandOptions {
   readonly fix?: true;
+  readonly audio?: true;
   readonly template?: string;
   readonly minimal?: true;
   readonly force?: true;
@@ -71,6 +72,8 @@ export interface CliCommandOptions {
   readonly fps?: 30 | 60;
   readonly rebuild?: true;
   readonly scene?: "opening" | "content" | "ending" | "all";
+  /** Scene-relative still position, where 0 is the first frame and 1 is the last. */
+  readonly progress?: number;
   readonly jobs?: number;
   readonly resume?: true;
   readonly target?: "codex" | "claude" | "both";
@@ -130,11 +133,11 @@ export const CLI_COMMAND_SPECS: readonly CliCommandSpec[] = Object.freeze([
   {
     id: "doctor",
     path: ["doctor"],
-    usage: "littlestart doctor [--fix]",
-    summary: "检查本机渲染环境",
+    usage: "littlestart doctor [--fix] [--audio]",
+    summary: "检查本机渲染环境，可选探测音频 MCP runtime",
     minPositionals: 0,
     maxPositionals: 0,
-    options: ["fix"],
+    options: ["fix", "audio"],
   },
   {
     id: "capabilities",
@@ -211,11 +214,11 @@ export const CLI_COMMAND_SPECS: readonly CliCommandSpec[] = Object.freeze([
   {
     id: "still",
     path: ["still"],
-    usage: "littlestart still <配置.json|-> [--scene <场景>] [--out <图片> | --out-dir <目录>]",
+    usage: "littlestart still <配置.json|-> [--scene <场景>] [--progress <0-1>] [--out <图片> | --out-dir <目录>]",
     summary: "导出用于视觉检查的静帧",
     minPositionals: 1,
     maxPositionals: 1,
-    options: ["scene", "out", "out-dir", "quality", "resolution", "force"],
+    options: ["scene", "progress", "out", "out-dir", "quality", "resolution", "force"],
   },
   {
     id: "probe",
@@ -397,6 +400,7 @@ const OPTION_DEFINITIONS: Readonly<Record<string, OptionDefinition>> = Object.fr
   version: { property: "version", kind: "boolean", global: true },
 
   fix: { property: "fix", kind: "boolean" },
+  audio: { property: "audio", kind: "boolean" },
   template: { property: "template", kind: "string" },
   minimal: { property: "minimal", kind: "boolean" },
   force: { property: "force", kind: "boolean" },
@@ -416,6 +420,7 @@ const OPTION_DEFINITIONS: Readonly<Record<string, OptionDefinition>> = Object.fr
     kind: "enum",
     values: ["opening", "content", "ending", "all"],
   },
+  progress: { property: "progress", kind: "number", min: 0, max: 1 },
   jobs: { property: "jobs", kind: "positiveInteger", min: 1, max: 32 },
   resume: { property: "resume", kind: "boolean" },
   target: {
@@ -1029,6 +1034,25 @@ export function parseCliArgs(
   }
 
   if (["produce", "audio.plan", "audio.generate"].includes(spec.id)) {
+    if (
+      spec.id === "produce" &&
+      commandOptions.bgmPrompt !== undefined &&
+      commandOptions.audioKind === undefined
+    ) {
+      throw new CliError(
+        "OPTION_CONFLICT",
+        "--bgm-prompt 必须同时明确 --audio-kind，CLI 不会猜测你要音乐还是环境音效",
+        {
+          issues: [
+            {
+              path: "options.audioKind",
+              message: "使用 --audio-kind music 或 --audio-kind sound-effect",
+            },
+          ],
+          hint: "舞台配乐使用 --audio-kind music；房间声、风声等环境音使用 --audio-kind sound-effect。",
+        },
+      );
+    }
     const audioKind = commandOptions.audioKind ?? "sound-effect";
     if (audioKind === "sound-effect" && commandOptions.model !== undefined) {
       throw new CliError("OPTION_CONFLICT", "--audio-kind sound-effect 不能与 --model 同时使用", {

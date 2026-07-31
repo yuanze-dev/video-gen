@@ -8,7 +8,7 @@ import {
   mediaTypeForMime,
   type BuiltinAssetId,
 } from "./asset-registry";
-import { CANVAS } from "./constants";
+import { CANVAS, DEVICE_ASPECT } from "./constants";
 
 // All spatial values are normalized 0..1 relative to the canvas, so the small
 // editor preview and the 1080x1920 render are equivalent.
@@ -104,6 +104,50 @@ export const ScreenRect = z
       });
     }
   });
+
+export const DeviceProfile = z
+  .object({
+    id: z
+      .string()
+      .min(1, { message: "设备档案 id 不能为空" })
+      .max(128, { message: "设备档案 id 不能超过 128 个字符" })
+      .regex(ASSET_ID_RE, {
+        message: "设备档案 id 只能包含英文字母、数字、点、下划线、冒号和连字符",
+      }),
+    kind: z
+      .enum(["phone", "professional-teleprompter", "custom"])
+      .default("custom"),
+    /**
+     * Height divided by width for the transparent device asset. Renderer
+     * geometry must follow the actual asset rather than assuming a phone.
+     */
+    aspectRatio: z
+      .number()
+      .min(0.4, { message: "设备档案宽高比不能小于 0.4" })
+      .max(3, { message: "设备档案宽高比不能大于 3" })
+      .default(DEVICE_ASPECT),
+    /** Screen calibration relative to the device asset box. */
+    screen: ScreenRect,
+  })
+  .strict();
+
+export const ContentLayout = z
+  .object({
+    preset: z
+      .enum(["free", "stage-mic-above-prompter"])
+      .default("free"),
+    /**
+     * Minimum center-to-center vertical separation in normalized canvas
+     * coordinates. It makes the semantic ordering explicit without rejecting
+     * intentional edge cropping or rotated microphone art.
+     */
+    minimumVerticalSeparation: z
+      .number()
+      .min(0, { message: "垂直间距不能小于 0" })
+      .max(1, { message: "垂直间距不能大于 1" })
+      .default(0.05),
+  })
+  .strict();
 
 const AssetRefBase = z
   .object({
@@ -226,7 +270,17 @@ const ProjectConfigBase = z
       .object({
         background: AssetRef,
         mic: z.object({ asset: AssetRef, transform: Transform }).strict(),
-        device: z.object({ asset: AssetRef, transform: Transform }).strict(),
+        device: z
+          .object({
+            asset: AssetRef,
+            transform: Transform,
+            profile: DeviceProfile.optional(),
+          })
+          .strict(),
+        layout: ContentLayout.default({
+          preset: "free",
+          minimumVerticalSeparation: 0.05,
+        }),
         teleprompter: z
           .object({
             mode: z.enum(["text", "video"]).default("text"),
@@ -311,6 +365,27 @@ export const ProjectConfig = ProjectConfigBase.superRefine((config, ctx) => {
     });
   }
 
+  const layout = config.content.layout;
+  if (layout.preset === "stage-mic-above-prompter") {
+    if (config.content.device.profile?.kind !== "professional-teleprompter") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["content", "device", "profile", "kind"],
+        message:
+          '舞台布局必须绑定 kind 为 "professional-teleprompter" 的设备档案，不能继续把手机当专业提词器',
+      });
+    }
+    const micY = config.content.mic.transform.y;
+    const deviceY = config.content.device.transform.y;
+    if (micY + layout.minimumVerticalSeparation > deviceY + Number.EPSILON) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["content", "layout", "preset"],
+        message: `舞台布局要求麦克风在专业提词器上方，当前 y=${micY}，提词器 y=${deviceY}，至少相隔 ${layout.minimumVerticalSeparation}`,
+      });
+    }
+  }
+
   for (const slot of ASSET_SLOTS) {
     const value = getAtPath(config, slot.path);
     if (!value || typeof value !== "object" || !("kind" in value)) continue;
@@ -356,6 +431,14 @@ export const ProjectConfig = ProjectConfigBase.superRefine((config, ctx) => {
 
 export type ProjectConfig = z.infer<typeof ProjectConfig>;
 
+export function teleprompterScreenFor(config: ProjectConfig) {
+  return config.content.device.profile?.screen ?? config.content.teleprompter.screen;
+}
+
+export function deviceAspectRatioFor(config: ProjectConfig): number {
+  return config.content.device.profile?.aspectRatio ?? DEVICE_ASPECT;
+}
+
 const DEFAULT_TELEPROMPTER_TEXT =
   "\n\n\n\nGood afternoon, ladies and gentlemen. This is the pre-boarding announcement for American Airlines Flight 1287 with service to Dallas/Fort Worth.\nWe are now inviting those passengers with small children, and any passengers requiring special assistance, to begin boarding at this time. Please have your boarding pass and a valid form of identification ready.\nWe would also like to welcome our AAdvantage® Executive Platinum and ConciergeKey® members to board at this time.";
 
@@ -387,6 +470,10 @@ export function makeDefaultConfig(): ProjectConfig {
       device: {
         asset: { kind: "builtin", id: "phone" },
         transform: { x: 0.5814, y: 0.6989, scale: 1.0407, rotation: 0, flipH: false, flipV: false },
+      },
+      layout: {
+        preset: "free",
+        minimumVerticalSeparation: 0.05,
       },
       teleprompter: {
         mode: "text",

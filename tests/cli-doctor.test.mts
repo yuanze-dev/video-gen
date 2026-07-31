@@ -156,6 +156,68 @@ test("offline fix reports a missing browser without creating or downloading", as
   assert.match(result.checks.find((check) => check.id === "chromium")?.message ?? "", /离线/);
 });
 
+test("doctor --audio probes MCP tools without a paid call and reports failures", async () => {
+  const parent = await temporaryDirectory("doctor-audio");
+  const common = {
+    nodeVersion: "22.14.0",
+    platform: "darwin" as const,
+    arch: "arm64",
+    homeDir: path.join(parent, "home"),
+    packaged: false,
+    importRenderer: async () => fakeRenderer,
+    inspectBrowser: async () => ({ status: "missing" as const }),
+  };
+  let probes = 0;
+  const healthy = await subject.doctor({
+    cacheDir: path.join(parent, "healthy-cache"),
+    audio: true,
+    dependencies: {
+      ...common,
+      probeAudioRuntime: async () => {
+        probes += 1;
+        return {
+          runtime: {
+            command: "/local/elevenlabs-mcp",
+            args: [],
+            source: "bundled",
+            version: "0.11.0",
+            integrity: "pinned-bundle",
+          },
+          inspection: {
+            toolCount: 27,
+            musicTools: ["compose_music"],
+            soundEffectTools: ["text_to_sound_effects"],
+          },
+        };
+      },
+    },
+  });
+  const check = healthy.checks.find((candidate) => candidate.id === "audio-runtime");
+  assert.equal(probes, 1);
+  assert.equal(check?.status, "ok");
+  assert.equal(check?.details?.paidCall, false);
+  assert.deepEqual(check?.details?.soundEffectTools, ["text_to_sound_effects"]);
+
+  const failed = await subject.doctor({
+    cacheDir: path.join(parent, "failed-cache"),
+    audio: true,
+    dependencies: {
+      ...common,
+      probeAudioRuntime: async () => {
+        throw new Error("initialize timed out");
+      },
+    },
+  });
+  assert.equal(
+    failed.checks.find((candidate) => candidate.id === "audio-runtime")?.status,
+    "error",
+  );
+  assert.match(
+    failed.checks.find((candidate) => candidate.id === "audio-runtime")?.message ?? "",
+    /initialize timed out/,
+  );
+});
+
 test("packaged doctor validates both runtime index and metadata", async () => {
   const parent = await temporaryDirectory("doctor-runtime");
   const runtimeSite = path.join(parent, "runtime", "remotion-site");

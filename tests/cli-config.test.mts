@@ -57,10 +57,22 @@ type TestConfig = {
     curtain: { color: string };
   };
   content: {
-    mic: { transform: { x: number; rotation: number } };
-    device: { transform: { scale: number; rotation: number } };
+    mic: { transform: { x: number; y: number; rotation: number } };
+    device: {
+      transform: { x: number; y: number; scale: number; rotation: number };
+      profile?: {
+        id: string;
+        kind: "phone" | "professional-teleprompter" | "custom";
+        aspectRatio: number;
+        screen: { x: number; y: number; w: number; h: number };
+      };
+    };
+    layout: {
+      preset: "free" | "stage-mic-above-prompter";
+      minimumVerticalSeparation: number;
+    };
     teleprompter: {
-      screen: { w: number };
+      screen: { x: number; y: number; w: number; h: number };
       text: { fontSize: number };
       video?: { asset: TestAssetRef };
     };
@@ -69,6 +81,10 @@ type TestConfig = {
 };
 
 type TestResolvedConfig = {
+  content: {
+    device: { aspectRatio: number };
+    teleprompter: { screen: { x: number; y: number; w: number; h: number } };
+  };
   ending: { video: { asset: { durationSec?: number } } };
 };
 
@@ -173,6 +189,57 @@ test("default config and built-in asset registry are internally consistent", asy
     assert.equal(asset.allowedSlots.includes(asset.defaultSlot), true);
     assert.deepEqual(item?.allowedSlots, [...asset.allowedSlots]);
     assert.equal(item?.usages.length, asset.allowedSlots.length);
+  }
+});
+
+test("professional device profiles calibrate the screen and enforce stage ordering", () => {
+  const config = structuredClone(core.makeDefaultConfig());
+  config.content.device.profile = {
+    id: "award-stage-prompter-v1",
+    kind: "professional-teleprompter",
+    aspectRatio: 1461 / 1076,
+    screen: { x: 0.196, y: 0.14, w: 0.606, h: 0.314 },
+  };
+  config.content.layout = {
+    preset: "stage-mic-above-prompter",
+    minimumVerticalSeparation: 0.05,
+  };
+  config.content.mic.transform.y = 0.17;
+  config.content.device.transform.y = 0.58;
+
+  const parsed = core.ProjectConfig.safeParse(config);
+  assert.equal(parsed.success, true);
+  if (!parsed.success) return;
+  const resolved = core.resolveConfig(parsed.data, {});
+  assert.deepEqual(resolved.content.teleprompter.screen, config.content.device.profile.screen);
+  assert.equal(
+    resolved.content.device.aspectRatio,
+    config.content.device.profile.aspectRatio,
+  );
+
+  const inverted = structuredClone(config);
+  inverted.content.mic.transform.y = 0.7;
+  const rejected = core.ProjectConfig.safeParse(inverted);
+  assert.equal(rejected.success, false);
+  if (!rejected.success) {
+    assert.ok(
+      rejected.error.issues.some(
+        (issue) => issue.path.map(String).join(".") === "content.layout.preset",
+      ),
+    );
+  }
+
+  const phoneProfile = structuredClone(config);
+  phoneProfile.content.device.profile!.kind = "phone";
+  const wrongDevice = core.ProjectConfig.safeParse(phoneProfile);
+  assert.equal(wrongDevice.success, false);
+  if (!wrongDevice.success) {
+    assert.ok(
+      wrongDevice.error.issues.some(
+        (issue) =>
+          issue.path.map(String).join(".") === "content.device.profile.kind",
+      ),
+    );
   }
 });
 

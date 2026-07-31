@@ -430,16 +430,14 @@ test("audio generate reuses a verified request-key cache before offline or crede
     content: { teleprompter: { text: { content: "Narration" } } },
   });
   const loaded = await projectModule.loadProjectInput(config);
-  const videoPlan = projectModule.createRenderPlan(loaded);
-  const plan = audioModule.createAudioGenerationPlan({
-    kind: "music",
+  const plan = produceModule.createNarrationAudioPlan({
+    input: loaded,
+    audioKind: "music",
     prompt,
-    contentDurationSec: videoPlan.timeline.content.seconds,
-    generationDurationSec: 34,
+    durationSec: 34,
     outputPath: output,
     manifestPath: manifest,
-    baseDir: loaded.baseDir,
-  });
+  }).plan;
   await seedVerifiedAudioCache(plan, loaded.baseDir);
 
   const result = await runCli(

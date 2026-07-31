@@ -57,6 +57,14 @@ littlestart doctor --fix
 
 不带 `--fix` 的 doctor 也会实际启动 Chromium 并创建 WebGL 上下文，而不只是检查文件是否存在。`--fix` 可在联网时下载缺失的浏览器；`--offline` 从不下载。
 
+生成背景音前可额外执行一次不扣费的 MCP 健康检查：
+
+```bash
+littlestart doctor --audio --json
+```
+
+`--audio` 只在本机启动 ElevenLabs MCP 并执行 initialize 与 tools/list，不会调用生成工具。离线模式只接受已经安装在本机的 runtime，不会让 `uvx` 临时联网下载。
+
 如果必须使用已审核的系统 Chromium，可设置 `REMOTION_BROWSER_EXECUTABLE` 为可执行文件路径。`doctor` 会优先校验并真实启动同一文件；路径无效时不会改为下载 CLI 浏览器。
 
 在没有网络的流水线中，先在联网环境用明确的缓存目录准备依赖，再持久化或传递同一目录。执行阶段先做离线探测，后续命令也必须传同一 `--cache-dir` 和 `--offline`：
@@ -96,6 +104,8 @@ littlestart produce video.json --bgm auto \
 ```
 
 `produce` 会在已配置 Key 时默认通过 ElevenLabs 音效生成接入旁白友好的背景音；未配置时使用现有音频或静音继续出片。最小配置不要覆盖 `opening.countdown`、`opening.curtain` 或 `ending`；标准生产会在付费请求和渲染前拒绝占位文案、不完整/过快的 3-2-1 幕帘、缺失开场音效或被替换/过短/静音的官方片尾。生产不会默认覆盖已有产物。确认要替换时显式加 `--force`。成片和封面以临时文件渲染并原子提交；失败或中断不会把半成品冒充成功产物。
+
+`still --scene content` 默认选择设备入场稳定后的代表帧，不再截取透明的内容首帧。需要检查滚动过程时使用场景相对位置，例如 `--progress 0.5`；取值范围为 0 到 1，`--scene all` 时会对三段应用相同进度。
 
 一个常用的最小补丁配置如下。未写字段由模板默认值补齐：
 
@@ -166,6 +176,7 @@ littlestart produce video.json \
 ```bash
 littlestart produce video.json \
   --bgm auto \
+  --audio-kind sound-effect \
   --bgm-prompt "steady commercial airliner cabin ambience, no music, no voices, no alarms" \
   --out output/video.mp4
 ```
@@ -190,13 +201,14 @@ ELEVENLABS_API_KEY=
 进程环境中的 `ELEVENLABS_API_KEY` 优先于该文件。Key 不进入 argv、视频配置、manifest、锁文件、日志或结果；不会隐式切换 Composio 或直连 REST。
 
 - `--audio-kind sound-effect|music`：整个项目默认 `sound-effect`；只有显式传 `music` 才调用 Music。音效不能搭配音乐模型参数。
+- `--bgm-prompt`：一旦显式提供方向，就必须同时显式选择 `--audio-kind sound-effect` 或 `--audio-kind music`。CLI 不根据 “BGM”、舞台、飞机等关键词猜类型。
 - `--bgm auto`：模板内置 BGM 会在有 Key 时升级为新背景音；已有本地/上传 BGM 和显式 `null` 默认保留。缺 Key 时返回 `BGM_GENERATION_SKIPPED` warning，并继续使用现有 BGM 或静音。
 - `--bgm required`：空 BGM 或内置模板 BGM 必须升级为生成音频；显式本地/upload BGM 默认保留，要替换它再加 `--replace-bgm`。缺 Key 返回 `AUTH_REQUIRED`，且不会写文件或发起付费调用。
 - `--bgm off`：关闭自动生成，保留配置中的现有设置。
 - `--replace-bgm`：明确覆盖已有 BGM；只在用户确实要求替换时使用。它属于强制生成意图；若没有同 request key 的已验证缓存，缺 Key 或离线时会失败，不会悄悄保留旧 BGM。
 - `--offline`：不启动 MCP；先复用同 request key 的已验证音频，否则 `auto` 使用已有 BGM/静音继续，无法满足的 `required` 失败。
 
-成功后会保留 MP3、旁路 manifest、prepared config 和 lock，最终使用 lock 渲染。`produce` 只在编码后 MP4 的 H.264/MP4、宽高、fps、总时长和应有音轨与 plan 相符后才原子发布；终态 result 还会返回 `productionGuard`、`scenes`和 `media`，调用方必须验收，不能只看进程退出码或预期路径。manifest 记录声音种类、所请求的 MCP 固定发行版、实际 runtime 来源与完整性、工具、prompt、时长和音频 SHA-256，不记录 Key；只有通过随包校验的 runtime 才记录固定源码提交和 wheel 摘要。同一 request key 的音频会在大小、摘要、时长与音轨验证后复用，因此渲染失败后重跑不会重复扣生成额度。
+成功后会保留 MP3、旁路 manifest、prepared config 和 lock，最终使用 lock 渲染。`produce` 只在编码后 MP4 的 H.264/MP4、宽高、fps、总时长和应有音轨与 plan 相符后才原子发布；终态 result 还会返回 `productionGuard`、`scenes` 和 `media`，调用方必须验收，不能只看进程退出码或预期路径。`productionGuard.checks.layout` 记录设备档案、屏幕来源、麦克风上下关系与垂直间距，`checks.audioIntent` 记录最终音频类型、状态和 request key。manifest 记录声音种类、所请求的 MCP 固定发行版、实际 runtime 来源与完整性、工具、prompt、时长和音频 SHA-256，不记录 Key；只有通过随包校验的 runtime 才记录固定源码提交和 wheel 摘要。同一 request key 的音频会在大小、摘要、时长与音轨验证后复用，因此渲染失败后重跑不会重复扣生成额度。`audio plan`、`audio generate` 与 `produce` 共用同一套旁白安全提示词构造，相同输入会得到相同 request key。
 
 `audio plan` 和 `audio generate` 仍提供给诊断/高级自动化，但一键视频主路径应使用 `produce`。这两个命令同样默认 `sound-effect`；显式 Music 必须传 `--audio-kind music`。发行前仍需按当前 ElevenLabs 账户计划、用途、地区和所选生成能力的现行条款重新核对授权；音乐还应核对 [Music Terms](https://elevenlabs.io/music-terms)。
 
@@ -207,14 +219,14 @@ ELEVENLABS_API_KEY=
 | 命令 | 用途 |
 |---|---|
 | `version` | 输出 CLI、协议和运行时版本 |
-| `doctor [--fix]` | 检查并按需准备本机渲染环境 |
+| `doctor [--fix] [--audio]` | 检查并按需准备本机渲染环境，可选无扣费探测音频 MCP |
 | `capabilities` | 自描述模板、格式、场景和运行能力 |
 | `init` | 生成完整或最小配置 |
 | `validate` | 严格校验配置、字段和素材 |
 | `plan` | 解析时长、帧数、输出规格与本地文件素材，但不渲染 |
 | `produce` | 自动准备/复用音乐或环境音效、写 prepared config 与 lock，并渲染最终视频 |
 | `render` | 渲染 MP4，并可同时输出封面 |
-| `still` | 导出 opening / content / ending 或全部场景静帧 |
+| `still` | 导出 opening / content / ending 或全部场景代表静帧，可用 `--progress` 选位置 |
 | `probe` | 读取本地媒体元数据与轨道信息 |
 | `audio plan` | 离线规划背景音请求、输出路径与配置补丁，不联网、不扣费 |
 | `audio generate` | 通过官方 ElevenLabs MCP 生成并固化本地音乐/音效（高级用法） |
@@ -321,7 +333,7 @@ Skill 会先从 `capabilities`、`config schema` 和 `help` 自发现当前 CLI 
 
 1. 先运行 `validate <配置> --json`，按 `issues[].path` 修复配置或素材。
 2. 素材问题运行 `probe <文件> --json` 或 `assets inspect <文件> --json`。
-3. 环境问题运行 `doctor --json`；允许准备依赖时再运行 `doctor --fix`。
+3. 环境问题运行 `doctor --json`；音频 runtime 问题运行 `doctor --audio --json`；允许准备依赖时再运行 `doctor --fix`。
 4. 只在缓存明确损坏时用 `cache prune` 或 `cache clear --force`；普通渲染失败无需先清缓存。
 5. 需要确认最终默认值和时长时运行 `config resolve` 与 `plan`。
 6. 首次自动化上线前，用 `still --scene all` 做视觉检查，再放开批量渲染。

@@ -13,6 +13,12 @@ import {
   resolveChromiumGlRenderer,
   type ChromiumGlRenderer,
 } from "./chromium";
+import {
+  inspectElevenLabsMcpRuntime,
+  resolveElevenLabsMcpRuntime,
+  type ElevenLabsMcpInspection,
+  type ElevenLabsMcpRuntime,
+} from "./elevenlabs-mcp";
 
 export type DoctorCheckStatus = "ok" | "warn" | "error";
 
@@ -67,10 +73,20 @@ export type DoctorDependencies = {
   importRenderer?: () => Promise<RendererModule>;
   inspectBrowser?: () => Promise<BrowserInspection>;
   ensureBrowser?: RendererModule["ensureBrowser"];
+  probeAudioRuntime?: (options: {
+    env: NodeJS.ProcessEnv;
+    offline: boolean;
+    signal?: AbortSignal;
+  }) => Promise<{
+    runtime: ElevenLabsMcpRuntime;
+    inspection: ElevenLabsMcpInspection;
+  }>;
 };
 
 export type DoctorOptions = {
   fix?: boolean;
+  /** Start the local ElevenLabs MCP and list tools without making a paid call. */
+  audio?: boolean;
   offline?: boolean;
   cacheDir: string;
   runtimeSite?: string;
@@ -103,6 +119,28 @@ type BrowserRuntimeProbe = {
   version: string | null;
   renderer: string | null;
 };
+
+async function probeAudioRuntime(options: {
+  env: NodeJS.ProcessEnv;
+  offline: boolean;
+  signal?: AbortSignal;
+}): Promise<{
+  runtime: ElevenLabsMcpRuntime;
+  inspection: ElevenLabsMcpInspection;
+}> {
+  const runtime = await resolveElevenLabsMcpRuntime(options.env);
+  if (options.offline && runtime.source === "uvx") {
+    throw new Error(
+      "离线模式下未找到本地 ElevenLabs MCP runtime；联网构建/安装一次，或配置本地可执行文件",
+    );
+  }
+  return {
+    runtime,
+    inspection: await inspectElevenLabsMcpRuntime(runtime, {
+      signal: options.signal,
+    }),
+  };
+}
 
 async function abortableTimeout<T>(
   promise: Promise<T>,
@@ -1158,6 +1196,57 @@ export async function doctor(options: DoctorOptions): Promise<DoctorResult> {
         status: "error",
         message: `Chromium runtime / WebGL 探针失败: ${errorMessage(error)}`,
         details: { renderer: chromiumGl, runtimeProbe: true },
+        fixable: false,
+      });
+    }
+  }
+
+  if (options.audio) {
+    throwIfAborted(options.signal);
+    try {
+      const baseEnv = dependencies.env ?? process.env;
+      const env = {
+        ...baseEnv,
+        ...(options.sourceRoot &&
+        !baseEnv.LITTLESTART_SOURCE_ROOT?.trim()
+          ? { LITTLESTART_SOURCE_ROOT: options.sourceRoot }
+          : {}),
+      };
+      const audioProbe = await (
+        dependencies.probeAudioRuntime?.({
+          env,
+          offline: options.offline === true,
+          signal: options.signal,
+        }) ??
+        probeAudioRuntime({
+          env,
+          offline: options.offline === true,
+          signal: options.signal,
+        })
+      );
+      throwIfAborted(options.signal);
+      checks.push({
+        id: "audio-runtime",
+        status: "ok",
+        message: `ElevenLabs MCP ${audioProbe.runtime.version} 可启动，音频工具完整`,
+        details: {
+          source: audioProbe.runtime.source,
+          integrity: audioProbe.runtime.integrity ?? "unverified",
+          version: audioProbe.runtime.version,
+          toolCount: audioProbe.inspection.toolCount,
+          musicTools: audioProbe.inspection.musicTools,
+          soundEffectTools: audioProbe.inspection.soundEffectTools,
+          paidCall: false,
+        },
+        fixable: false,
+      });
+    } catch (error) {
+      throwIfAborted(options.signal);
+      checks.push({
+        id: "audio-runtime",
+        status: "error",
+        message: `ElevenLabs MCP 音频 runtime 探测失败: ${errorMessage(error)}`,
+        details: { paidCall: false },
         fixable: false,
       });
     }

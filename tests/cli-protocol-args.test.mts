@@ -118,6 +118,22 @@ test("events select NDJSON mode and conflict with single-document JSON", () => {
   expectCliError(["doctor", "--events", "json"], "INVALID_OPTION_VALUE");
 });
 
+test("doctor audio probe and representative still progress are strictly parsed", () => {
+  assert.deepEqual(parse(["doctor", "--audio"]).options, { audio: true });
+  assert.deepEqual(
+    parse(["still", "video.json", "--scene", "content", "--progress", "0.4"]).options,
+    { scene: "content", progress: 0.4 },
+  );
+  expectCliError(
+    ["still", "video.json", "--scene", "content", "--progress", "-0.01"],
+    "INVALID_OPTION_VALUE",
+  );
+  expectCliError(
+    ["still", "video.json", "--scene", "content", "--progress", "1.01"],
+    "INVALID_OPTION_VALUE",
+  );
+});
+
 test("bootstrap detection preserves machine output for parser failures", () => {
   assert.deepEqual(
     detectCliBootstrapOptions(["--json", "render", "video.json", "--unknown"], { env: {} }),
@@ -232,6 +248,24 @@ test("audio options are strict, bounded, and default-safe", () => {
   assert.deepEqual(
     parse(["audio", "plan", "video.json", "--prompt", "room tone", "--duration", "2.9"]).options,
     { prompt: "room tone", duration: 2.9 },
+  );
+  expectCliError(
+    ["produce", "video.json", "--bgm-prompt", "warm award ceremony score"],
+    "OPTION_CONFLICT",
+  );
+  assert.deepEqual(
+    parse([
+      "produce",
+      "video.json",
+      "--bgm-prompt",
+      "warm award ceremony score",
+      "--audio-kind",
+      "music",
+    ]).options,
+    {
+      bgmPrompt: "warm award ceremony score",
+      audioKind: "music",
+    },
   );
   expectCliError(["audio", "plan", "video.json", "--prompt", "x", "--duration", "0.4"], "INVALID_OPTION_VALUE");
   expectCliError(["audio", "plan", "video.json", "--prompt", "x", "--duration", "5.1"], "INVALID_OPTION_VALUE");

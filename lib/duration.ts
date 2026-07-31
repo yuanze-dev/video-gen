@@ -4,7 +4,6 @@ import {
   MIN_CONTENT_SEC,
   MAX_CONTENT_SEC,
   DEVICE_BASE_W,
-  DEVICE_ASPECT,
 } from "./constants";
 import { DEFAULT_ENDING_DURATION_SEC } from "./config-schema";
 
@@ -40,7 +39,7 @@ export function contentSec(cfg: ResolvedConfig): number {
   if (!text) return MIN_CONTENT_SEC;
   const scale = cfg.content.device.scale;
   const deviceW = DEVICE_BASE_W * scale;
-  const deviceH = deviceW * DEVICE_ASPECT;
+  const deviceH = deviceW * cfg.content.device.aspectRatio;
   const screenW = deviceW * t.screen.w;
   const screenH = deviceH * t.screen.h;
   const textH = estimateTextHeight(text.content, text.fontSize, screenW);

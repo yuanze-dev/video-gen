@@ -279,18 +279,32 @@ export const useEditor = create<State>((set, get) => ({
     }),
 
   setScreen: (patch) =>
-    set((s) => ({
-      config: {
-        ...s.config,
-        content: {
-          ...s.config.content,
-          teleprompter: {
-            ...s.config.content.teleprompter,
-            screen: { ...s.config.content.teleprompter.screen, ...patch },
+    set((s) => {
+      const profile = s.config.content.device.profile;
+      return {
+        config: {
+          ...s.config,
+          content: {
+            ...s.config.content,
+            device: profile
+              ? {
+                  ...s.config.content.device,
+                  profile: {
+                    ...profile,
+                    screen: { ...profile.screen, ...patch },
+                  },
+                }
+              : s.config.content.device,
+            teleprompter: {
+              ...s.config.content.teleprompter,
+              // Keep the legacy fallback synchronized so removing a profile
+              // never moves the screen unexpectedly.
+              screen: { ...s.config.content.teleprompter.screen, ...patch },
+            },
           },
         },
-      },
-    })),
+      };
+    }),
 
   addAsset: async (target, file) => {
     const job = nextAssetJob(target);

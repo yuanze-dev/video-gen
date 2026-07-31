@@ -13,6 +13,10 @@ import { totalFrames, openingFrames, contentFrames, endingFrames } from "@/lib/d
 import { micBox, deviceBox } from "@/lib/coords";
 import { CANVAS } from "@/lib/constants";
 import {
+  deviceAspectRatioFor,
+  teleprompterScreenFor,
+} from "@/lib/config-schema";
+import {
   useEditor,
   type DragTarget,
   type ContentTarget,
@@ -232,8 +236,11 @@ export function Preview() {
     e.preventDefault();
     e.stopPropagation();
     setSelected("device");
-    const dev = deviceBox(config.content.device.transform);
-    const sc = config.content.teleprompter.screen;
+    const dev = deviceBox({
+      ...config.content.device.transform,
+      aspectRatio: deviceAspectRatioFor(config),
+    });
+    const sc = teleprompterScreenFor(config);
     dragRef.current = {
       kind: mode,
       startX: e.clientX,
@@ -328,7 +335,10 @@ export function Preview() {
       ? openingBox(target)
       : target === "mic"
         ? micBox(config.content.mic.transform)
-        : deviceBox(config.content.device.transform);
+        : deviceBox({
+            ...config.content.device.transform,
+            aspectRatio: deviceAspectRatioFor(config),
+          });
     return { left: b.left * sf, top: b.top * sf, width: b.width * sf, height: b.height * sf };
   };
 
@@ -505,7 +515,7 @@ export function Preview() {
         {showOverlay && selected === "device"
           ? (() => {
               const dev = dispBox("device");
-              const sc = config.content.teleprompter.screen;
+              const sc = teleprompterScreenFor(config);
               return (
                 <div
                   onPointerDown={(e) => onScreenPointerDown(e, "screen-move")}

@@ -104,7 +104,7 @@ littlestart produce video.json \
   --events ndjson
 ```
 
-只有用户给出更具体的环境音方向时才需要 `--bgm-prompt`；内容必须是“空间 + 持续声源”，例如 `modern aircraft cockpit ambience with turbofan hum, ventilation and avionics fans`，不能是台词、故事事件或报警指令。
+只有用户给出更具体的环境音方向时才需要 `--bgm-prompt`；内容必须是“空间 + 持续声源”，例如 `modern aircraft cockpit ambience with turbofan hum, ventilation and avionics fans`，不能是台词、故事事件或报警指令。一旦写 `--bgm-prompt`，必须同时写 `--audio-kind sound-effect`；CLI 不根据文案猜类型。
 
 只有用户明确要求配乐、曲风、乐器或旋律时才显式使用 Music；不能因题材或模糊的“BGM”一词自行切换：
 
@@ -121,11 +121,41 @@ littlestart produce video.json \
 
 同一 request key 的 MP3 与 manifest 会先经过摘要、时长和音轨校验；命中后即使缺 Key 或离线也能复用，避免重跑重复扣费。没有可复用缓存时，`--bgm auto` 缺 Key 会保留现有 BGM 或静音继续渲染，并在最终信封返回 warning；`--bgm required` 对空 BGM 或内置模板 BGM 都是生成候选，缺 Key 时零写入失败。已有本地/上传 BGM 默认保留，只有明确要求替换时才加 `--replace-bgm`；该选项表示强制生成意图，无可复用缓存且缺 Key 或离线时必须失败，不能悄悄保留旧 BGM。音乐生成时长限制为 3–600 秒；音效生成时长限制为 0.5–5 秒并默认循环覆盖更长正片。
 
-`audio plan` / `audio generate` 保留给诊断和高级自动化；它们不是最终用户的一键视频主路径。若单独使用，仍必须由调用方把 result 的 `configPatch` 接入配置后再渲染。
+`audio plan` / `audio generate` 保留给诊断和高级自动化；它们不是最终用户的一键视频主路径。若单独使用，仍必须由调用方把 result 的 `configPatch` 接入配置后再渲染。三条音频路径共用同一套旁白安全提示词拼装，因此相同配置、方向、类型、时长和音量必须产生相同 request key。
+
+## 专业提词器设备档案
+
+自定义设备素材不能只换 `content.device.asset` 后继续沿用手机的几何假设。专业舞台提词器应同时写入设备档案和布局契约：
+
+```json
+{
+  "content": {
+    "mic": {
+      "transform": { "x": 0.82, "y": 0.17, "scale": 1.25, "rotation": -30 }
+    },
+    "device": {
+      "asset": { "kind": "file", "path": "./assets/pro-stage-teleprompter.png" },
+      "transform": { "x": 0.5, "y": 0.58, "scale": 1.05 },
+      "profile": {
+        "id": "award-stage-prompter-v1",
+        "kind": "professional-teleprompter",
+        "aspectRatio": 1.3578,
+        "screen": { "x": 0.196, "y": 0.14, "w": 0.606, "h": 0.314 }
+      }
+    },
+    "layout": {
+      "preset": "stage-mic-above-prompter",
+      "minimumVerticalSeparation": 0.05
+    }
+  }
+}
+```
+
+`profile.screen` 是相对设备素材外框的 0..1 矩形，并优先于旧的 `teleprompter.screen`；`aspectRatio` 是素材高度除以宽度。舞台 preset 会要求档案类型确实是专业提词器，并在 `validate` 阶段拒绝“麦克风在下、提词器在上”或间距不足的配置。它不阻止有意的边缘裁切和旋转，所以仍必须实际查看静帧。
 
 把提词器内容切成视频时，不要只改 `mode`。先从 schema 确认当前 `video` 对象结构，再同时提供本地视频并决定是否保留原声。标准一键生产不得替换片尾；只有用户明确要求自定义片尾时，才使用 schema 中的 ending 素材槽位并在 `produce` 上加 `--allow-custom-structure`，且必须实际检查其完整时长和首中末画面。
 
-调整麦克风、设备或屏幕区域时，保持归一化坐标语义，先校验边界，再导出三段静帧进行视觉检查。不要仅凭 JSON 数值判断位置正确。
+调整麦克风、设备或屏幕区域时，保持归一化坐标语义，先校验边界，再导出三段静帧进行视觉检查。`still --scene content` 默认避开入场透明帧；检查滚动中段可加 `--progress 0.5`。不要仅凭 JSON 数值判断位置正确。
 
 ## 严格校验与迁移
 

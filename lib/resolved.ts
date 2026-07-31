@@ -1,6 +1,8 @@
 import {
   DEFAULT_ENDING_ASSET_ID,
   DEFAULT_ENDING_DURATION_SEC,
+  deviceAspectRatioFor,
+  teleprompterScreenFor,
   type ProjectConfig,
 } from "./config-schema";
 import { getBuiltinAsset } from "./asset-registry";
@@ -34,7 +36,7 @@ export type ResolvedConfig = {
   content: {
     background: ResolvedAsset;
     mic: { asset: ResolvedAsset } & Transform;
-    device: { asset: ResolvedAsset } & Transform;
+    device: { asset: ResolvedAsset; aspectRatio: number } & Transform;
     teleprompter: {
       mode: "text" | "video";
       screen: { x: number; y: number; w: number; h: number };
@@ -129,10 +131,11 @@ export function resolveConfig(cfg: ProjectConfig, urls: UrlMap): ResolvedConfig 
       device: {
         asset: resolveAsset(cfg.content.device.asset, urls),
         ...cfg.content.device.transform,
+        aspectRatio: deviceAspectRatioFor(cfg),
       },
       teleprompter: {
         mode: t.mode,
-        screen: { ...t.screen },
+        screen: { ...teleprompterScreenFor(cfg) },
         text: t.text ? { ...t.text } : undefined,
         video: t.video
           ? { asset: resolveAsset(t.video.asset, urls), keepAudio: t.video.keepAudio }

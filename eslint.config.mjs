@@ -13,7 +13,15 @@ const eslintConfig = defineConfig([
     "build/**",
     "cli/dist/**",
     "electron/dist/**",
+    "packages/littlestart-cli/dist/**",
+    "packages/littlestart-cli/runtime/**",
+    "packages/littlestart-cli/*.cjs",
     "public/remotion-site/**",
+    "release/**",
+    // Node tests bundle subjects into short-lived hidden directories below
+    // the repository. Ignoring them prevents eslint's directory walk racing
+    // the test cleanup and keeps generated bundles out of source lint.
+    ".*-test-*/**",
     "next-env.d.ts",
   ]),
 ]);

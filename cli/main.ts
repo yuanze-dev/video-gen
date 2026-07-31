@@ -26,7 +26,6 @@ import {
   MAX_SOUND_EFFECT_DURATION_SEC,
   MIN_SOUND_EFFECT_DURATION_SEC,
   SOUND_EFFECT_OUTPUT_FORMAT,
-  createAudioGenerationPlan,
   generatePlannedAudio,
   MAX_GENERATED_AUDIO_BYTES,
 } from "./audio";
@@ -95,7 +94,9 @@ import {
 } from "./runtime";
 import {
   assertStandardProductionStructure,
+  createNarrationAudioPlan,
   createProductionAudioPlan,
+  createProductionQualitySummary,
   isGeneratedCandidate,
   prepareVideoProduction,
 } from "./produce";
@@ -113,6 +114,7 @@ import {
   ChromiumGlConfigurationError,
   resolveChromiumGlRenderer,
 } from "./chromium";
+import { createThrottledProgressReporter } from "./progress";
 
 type CommandResult = {
   result: unknown;
@@ -322,14 +324,18 @@ async function browserExecutable(context: CommandContext, runtime: CliRuntime): 
   return browser.path;
 }
 
-function throttledProgress(emitter: CliEmitter, stage: string): (ratio: number) => void {
-  let lastPercent = -1;
-  return (ratio) => {
-    const percent = Math.floor(ratio * 100);
-    if (percent < 100 && percent < lastPercent + 2) return;
-    lastPercent = percent;
-    emitter.progress(ratio, { stage, message: `渲染进度 ${percent}%` });
-  };
+function throttledProgress(
+  emitter: CliEmitter,
+  stage: string,
+  options: { base?: number; span?: number; label?: string } = {},
+): (ratio: number) => void {
+  const label = options.label ?? "渲染进度";
+  return createThrottledProgressReporter(
+    ({ ratio, percent }) => {
+      emitter.progress(ratio, { stage, message: `${label} ${percent}%` });
+    },
+    { base: options.base, span: options.span, minimumPercentStep: 2 },
+  );
 }
 
 function runtimeRenderBase(
@@ -396,6 +402,7 @@ async function dispatch(context: CommandContext): Promise<CommandResult> {
       const runtime = await context.getRuntime();
       const result = await doctor({
         fix: invocation.options.fix,
+        audio: invocation.options.audio,
         offline: invocation.global.offline,
         cacheDir: context.cacheDir,
         runtimeSite: runtime.runtimeSite,
@@ -693,12 +700,11 @@ async function dispatch(context: CommandContext): Promise<CommandResult> {
           production.preparedInput.config.content.bgm !== null ||
           production.preparedInput.config.opening.curtain.sfx !== null,
         rebuild: !runtime.packaged && invocation.options.rebuild === true,
-        onProgress: (ratio) => {
-          emitter.progress(0.25 + ratio * 0.75, {
-            stage: "render",
-            message: `视频渲染 ${Math.floor(ratio * 100)}%`,
-          });
-        },
+        onProgress: throttledProgress(emitter, "render", {
+          base: 0.25,
+          span: 0.75,
+          label: "视频渲染",
+        }),
       });
       return {
         result: {
@@ -712,6 +718,10 @@ async function dispatch(context: CommandContext): Promise<CommandResult> {
           productionGuard: {
             policy: invocation.options.allowCustomStructure === true ? "custom" : "standard",
             passed: true,
+            checks: createProductionQualitySummary(
+              production.preparedInput.config,
+              production.audio,
+            ),
           },
           preparedConfig: production.preparedConfig,
           lock: production.lockPath,
@@ -787,6 +797,7 @@ async function dispatch(context: CommandContext): Promise<CommandResult> {
         const rendered = await renderSceneStills({
           ...runtimeRenderBase(context, runtime, browser, input, options),
           outDir,
+          progress: invocation.options.progress,
           overwrite: invocation.options.force === true,
         });
         return {
@@ -808,6 +819,7 @@ async function dispatch(context: CommandContext): Promise<CommandResult> {
         ...runtimeRenderBase(context, runtime, browser, input, options),
         outPath,
         scene,
+        progress: invocation.options.progress,
         imageFormat: path.extname(outPath).toLowerCase() === ".png" ? "png" : "jpeg",
         overwrite: invocation.options.force === true,
       });
@@ -824,21 +836,20 @@ async function dispatch(context: CommandContext): Promise<CommandResult> {
         const runtime = await context.getRuntime();
         assertLockRuntime(input, runtime);
       }
-      const videoPlan = createRenderPlan(input);
-      const audioPlan = createAudioGenerationPlan({
-        kind: invocation.options.audioKind,
+      const plannedAudio = createNarrationAudioPlan({
+        input,
         provider: invocation.options.provider,
         model: invocation.options.model,
         prompt: invocation.options.prompt!,
-        contentDurationSec: videoPlan.timeline.content.seconds,
-        generationDurationSec: invocation.options.duration,
+        durationSec: invocation.options.duration,
         volume: invocation.options.volume,
         outputPath: invocation.options.out ? path.resolve(invocation.options.out) : undefined,
         manifestPath: invocation.options.manifest
           ? path.resolve(invocation.options.manifest)
           : undefined,
-        baseDir: input.baseDir,
+        audioKind: invocation.options.audioKind,
       });
+      const audioPlan = plannedAudio.plan;
       assertExtension(audioPlan.outputPath, [".mp3"], "options.out");
       assertExtension(audioPlan.manifestPath, [".json"], "options.manifest");
       if (audioPlan.outputPath === audioPlan.manifestPath) {

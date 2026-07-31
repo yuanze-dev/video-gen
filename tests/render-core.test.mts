@@ -12,7 +12,10 @@ const compiledFile = path.join(compiledDir, "render-core.mjs");
 const compiledConfigFile = path.join(compiledDir, "config-schema.mjs");
 
 type RenderCore = typeof import("../cli/render.ts") & typeof import("../cli/cache.ts");
-type ConfigSchema = typeof import("../lib/config-schema.ts");
+type ConfigSchema =
+  typeof import("../lib/config-schema.ts") &
+  typeof import("../lib/resolved.ts") &
+  typeof import("../lib/duration.ts");
 let core: RenderCore;
 let configSchema: ConfigSchema;
 
@@ -48,7 +51,15 @@ before(async () => {
     sourcemap: "inline",
   });
   await build({
-    entryPoints: [path.join(root, "lib", "config-schema.ts")],
+    stdin: {
+      contents: `
+        export * from "./lib/config-schema.ts";
+        export * from "./lib/resolved.ts";
+        export * from "./lib/duration.ts";
+      `,
+      resolveDir: root,
+      loader: "ts",
+    },
     outfile: compiledConfigFile,
     bundle: true,
     packages: "external",
@@ -60,6 +71,25 @@ before(async () => {
   configSchema = (await import(
     `${pathToFileURL(compiledConfigFile).href}?t=${Date.now()}`
   )) as ConfigSchema;
+});
+
+test("scene still frames default to representative content and support explicit progress", () => {
+  const resolved = configSchema.resolveConfig(configSchema.makeDefaultConfig(), {});
+  const opening = configSchema.openingFrames(resolved);
+  const content = configSchema.contentFrames(resolved);
+
+  assert.equal(core.frameForScene(resolved, "opening"), 0);
+  assert.equal(core.frameForScene(resolved, "content", 0), opening);
+  assert.equal(core.frameForScene(resolved, "content", 1), opening + content - 1);
+  assert.ok(core.frameForScene(resolved, "content") > opening);
+  assert.equal(
+    core.frameForScene(resolved, "ending", 0),
+    opening + content,
+  );
+  assert.throws(
+    () => core.frameForScene(resolved, "content", 1.1),
+    /0 到 1/,
+  );
 });
 
 after(async () => {
@@ -993,6 +1023,10 @@ test("renders all named scene stills and cleans cancelled partial output", { tim
       assert.ok((await fs.stat(output.outputPath)).size > 0);
       assert.equal(output.scene, scene);
     }
+    assert.ok(
+      result.outputs.content!.frame > 45,
+      "content still should be sampled after its 30fps entrance frame",
+    );
 
     const controller = new AbortController();
     controller.abort(new Error("test cancellation"));

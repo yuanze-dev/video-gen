@@ -2,6 +2,7 @@ import { CLI_COMMAND_SPECS, CLI_GLOBAL_OPTION_NAMES } from "./args";
 
 const OPTION_HELP: Readonly<Record<string, string>> = {
   fix: "--fix                 下载或修复缺失的浏览器（可能联网）",
+  audio: "--audio               本地启动 ElevenLabs MCP 并检查工具列表（不生成、不扣费）",
   template: "--template <id>       选择模板（当前为 teleprompter）",
   minimal: "--minimal             仅写入常用改动字段",
   force: "--force               显式覆盖已有目标",
@@ -13,6 +14,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   fps: "--fps <帧率>          30 | 60",
   rebuild: "--rebuild             忽略现有源码 bundle 缓存",
   scene: "--scene <场景>        opening | content | ending | all",
+  progress: "--progress <0-1>      场景内取帧位置；content 默认避开入场透明帧",
   jobs: "--jobs <数量>         批量渲染并发数（1-32）",
   resume: "--resume              使用内容摘要安全断点续跑",
   target: "--target <目标>       codex | claude | both",
@@ -25,7 +27,7 @@ const OPTION_HELP: Readonly<Record<string, string>> = {
   model: "--model <模型>        music_v2 | music_v1",
   manifest: "--manifest <路径>   指定生成旁路 manifest 路径",
   bgm: "--bgm <策略>           auto | off | required（默认 auto）",
-  "bgm-prompt": "--bgm-prompt <方向>  补充音乐或环境音方向；CLI 自动加入旁白安全约束",
+  "bgm-prompt": "--bgm-prompt <方向>  补充音频方向；同时必须明确 --audio-kind",
   "replace-bgm": "--replace-bgm         明确替换已有 BGM；无缓存且缺 Key/离线时失败",
   "allow-custom-structure": "--allow-custom-structure  仅在用户明确要求时，允许自定义标准 3-2-1 幕帘或官方片尾",
   "prepared-config": "--prepared-config <路径>  持久化已接入 BGM 的配置",

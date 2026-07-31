@@ -21,10 +21,10 @@ littlestart produce video.json \
 
 1. 校验配置和所有本地素材后再渲染。
 2. 从 plan 读取三段时长、总帧数和输出规格；标准结构必须有 opening/content/ending，opening 至少 1.4 秒，ending 至少 1 秒。其 `assets` 只是已解析的本地文件，内置引用需另结合 `config resolve` 与 `assets` 命令。发现异常先停下修配置。
-3. 实际查看静帧。检查标题是否截断、文字与背景对比、幕帘、麦克风/设备位置、屏幕裁切和片尾画面。`still --scene all` 是预检而不是成片证明；最终仍以 `produce` 对编码后 MP4 的规格/时长/音轨验收和发布包的连续帧回归门禁为准。
-4. 从唯一最终 result 获取成片、prepared config、lock、音频/manifest 路径与 `audio.status`。必须断言 `productionGuard={policy:"standard",passed:true}`，`scenes` 三段齐全，`media` 的 H.264/MP4、宽高、fps、总时长与 plan 相符，需要声音时 `audioCodec` 非空。若只有进度、没有 result 终态，按失败处理。
+3. 实际查看静帧。内容段默认选择设备入场稳定后的代表帧；要检查滚动中段或末段时用 `--progress 0.5` 或 `--progress 1`。检查标题是否截断、文字与背景对比、幕帘、麦克风/设备位置、屏幕裁切和片尾画面。`still --scene all` 是预检而不是成片证明；最终仍以 `produce` 对编码后 MP4 的规格/时长/音轨验收和发布包的连续帧回归门禁为准。
+4. 从唯一最终 result 获取成片、prepared config、lock、音频/manifest 路径与 `audio.status`。必须断言 `productionGuard.policy="standard"`、`passed=true`、`checks.layout.passed=true`，并核对 `checks.audioIntent.kind/status/requestKey` 与本次意图一致；`scenes` 三段齐全，`media` 的 H.264/MP4、宽高、fps、总时长与 plan 相符，需要声音时 `audioCodec` 非空。若只有进度、没有 result 终态，按失败处理。
 
-默认不传 `--audio-kind`，CLI 走音效生成并追加稳定无缝循环、无音乐/人声/警报/突发瞬态约束，只生成一次最多 5 秒的循环素材。默认提示词会从画面/词稿识别声源；例如航空内容使用涡扇低鸣、通风、航电风扇和机身共鸣，而不使用 Mayday 对白、警报或剧情化声音。只有用户明确给出配乐、曲风、乐器或旋律要求时，才同时传 `--audio-kind music` 与 `--bgm-prompt`；CLI 会追加纯器乐与旁白留白约束。只有明确要求必须新生成背景音时使用 `--bgm required`；它会为空 BGM 或内置 fallback 生成，显式本地/upload BGM 仍保留，要替换时再加 `--replace-bgm`。Key 只从环境或本机 secrets.env 读取。相同 request key 的已验证音频会在凭据与离线检查之前复用；未命中时，`auto` 缺 Key 会带 warning 使用现有 BGM/静音继续，`required` 或 `--replace-bgm` 缺 Key/离线时失败，不能悄悄保留旧 BGM。
+没有自定义方向时默认不传 `--audio-kind`，CLI 走音效生成并追加稳定无缝循环、无音乐/人声/警报/突发瞬态约束，只生成一次最多 5 秒的循环素材。默认提示词会从画面/词稿识别声源；例如航空内容使用涡扇低鸣、通风、航电风扇和机身共鸣，而不使用 Mayday 对白、警报或剧情化声音。一旦传 `--bgm-prompt`，必须同时明确 `--audio-kind sound-effect|music`；CLI 不猜类型。只有用户明确给出配乐、曲风、乐器或旋律要求时才选择 Music，并追加纯器乐与旁白留白约束。只有明确要求必须新生成背景音时使用 `--bgm required`；它会为空 BGM 或内置 fallback 生成，显式本地/upload BGM 仍保留，要替换时再加 `--replace-bgm`。Key 只从环境或本机 secrets.env 读取。相同 request key 的已验证音频会在凭据与离线检查之前复用；`audio plan`、`audio generate` 与 `produce` 对相同输入使用同一 request key。未命中时，`auto` 缺 Key 会带 warning 使用现有 BGM/静音继续，`required` 或 `--replace-bgm` 缺 Key/离线时失败，不能悄悄保留旧 BGM。
 
 若对未锁定配置选择非默认 `--quality`、`--resolution` 或 `--fps`，`validate`、`plan` 和 `produce` 必须传入完全相同的三元组。
 
@@ -34,6 +34,7 @@ littlestart produce video.json \
 
 ```bash
 littlestart doctor --offline --json
+littlestart doctor --audio --offline --json
 littlestart validate video.json --json
 littlestart plan video.json --json
 ```
@@ -85,7 +86,7 @@ littlestart batch batch.json \
 littlestart doctor --offline --cache-dir .cache/littlestart --json
 ```
 
-之后的 validate、plan、render 或 batch 都传同一个 `--cache-dir` 与 `--offline`。doctor 会实际启动 Chromium 并创建 WebGL 上下文；离线模式仍探测，但不下载。缺少离线资源时让任务明确失败，不临时开放网络或切换成云端服务。
+之后的 validate、plan、render 或 batch 都传同一个 `--cache-dir` 与 `--offline`。doctor 会实际启动 Chromium 并创建 WebGL 上下文；`doctor --audio` 还会在本地执行 MCP initialize 与 tools/list，但不会调用生成工具。离线模式仍探测已安装资源，但不下载。缺少离线资源时让任务明确失败，不临时开放网络或切换成云端服务。
 
 无 GPU 的容器或 CI 可设置 `LITTLESTART_CHROMIUM_GL=swangle`；其他本机环境默认为 `angle`。只允许 `angle` 或 `swangle`，其他值应被视为配置错误并失败，不要为了继续而改成未知值。
 
@@ -122,7 +123,7 @@ littlestart skill install [--target codex|claude|both] [--scope project|user] [-
 | 配置 | 运行 `validate --json`，按 `issues[].path` 修复 |
 | 本地素材 | 运行 `probe` 或 `assets inspect`，检查路径、内容和槽位 |
 | ElevenLabs 未配置 | `auto` 查看 warning 和 fallback；`required` 时在 Electron 或 secrets.env 填 Key |
-| MCP runtime / tool | 从 Electron 修复 CLI/MCP 安装，确认 bundled sidecar 以及 `compose_music` / `text_to_sound_effects` |
+| MCP runtime / tool | 先运行 `doctor --audio --json`；再从 Electron 修复 CLI/MCP 安装，确认 bundled sidecar 以及 `compose_music` / `text_to_sound_effects` |
 | 远程音频限流 | 按 Retry-After 退避，复用 request key，避免并发重试或切换 Provider |
 | 环境或离线资源 | 运行 `doctor --json`；获准后再 `doctor --fix` |
 | 输出已存在或不可写 | 选择新路径或在获准覆盖后使用 `--force` |
