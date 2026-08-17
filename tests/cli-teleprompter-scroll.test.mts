@@ -32,17 +32,15 @@ after(async () => {
   await fs.rm(compiledDir, { recursive: true, force: true });
 });
 
-test("teleprompter scroll is a constant upward displacement for every frame", () => {
+test("teleprompter scroll is constant and fully clears the screen before ending", () => {
   const contentFrames = 360;
-  const screenH = 1_020;
   const renderedTextH = 2_740;
   const positions = Array.from({ length: contentFrames }, (_, frame) => {
     const transform = teleprompter.teleprompterScrollTransform(
       frame,
       contentFrames,
-      screenH,
     );
-    return (transform.yPercent / 100) * renderedTextH + transform.leadOutY;
+    return (transform.yPercent / 100) * renderedTextH;
   });
   const expectedStep = positions[1] - positions[0];
 
@@ -54,17 +52,17 @@ test("teleprompter scroll is a constant upward displacement for every frame", ()
     );
   }
   assert.equal(positions[0], 0);
-  assert.ok(Math.abs(positions.at(-1)! - (-renderedTextH + screenH * 0.55)) < 1e-9);
+  assert.ok(Math.abs(positions.at(-1)! + renderedTextH) < 1e-9);
 });
 
 test("teleprompter scroll clamps premounted and post-roll frames", () => {
-  const first = teleprompter.teleprompterScrollTransform(-60, 360, 1_020);
-  const last = teleprompter.teleprompterScrollTransform(999, 360, 1_020);
-  const still = teleprompter.teleprompterScrollTransform(0, 1, 1_020);
+  const first = teleprompter.teleprompterScrollTransform(-60, 360);
+  const last = teleprompter.teleprompterScrollTransform(999, 360);
+  const still = teleprompter.teleprompterScrollTransform(0, 1);
 
-  assert.deepEqual(first, { yPercent: 0, leadOutY: 0 });
-  assert.deepEqual(last, { yPercent: -100, leadOutY: 561 });
-  assert.deepEqual(still, { yPercent: 0, leadOutY: 0 });
+  assert.deepEqual(first, { yPercent: 0 });
+  assert.deepEqual(last, { yPercent: -100 });
+  assert.deepEqual(still, { yPercent: 0 });
 });
 
 test("teleprompter renderer does not restore asynchronous DOM height measurement", async () => {

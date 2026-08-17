@@ -21,7 +21,7 @@ littlestart produce video.json \
 
 1. 校验配置和所有本地素材后再渲染。
 2. 从 plan 读取三段时长、总帧数和输出规格；标准结构必须有 opening/content/ending，opening 至少 1.4 秒，ending 至少 1 秒。其 `assets` 只是已解析的本地文件，内置引用需另结合 `config resolve` 与 `assets` 命令。发现异常先停下修配置。
-3. 实际查看静帧。内容段默认选择设备入场稳定后的代表帧；要检查滚动中段或末段时用 `--progress 0.5` 或 `--progress 1`。检查标题是否截断、文字与背景对比、幕帘、麦克风/设备位置、屏幕裁切和片尾画面。`still --scene all` 是预检而不是成片证明；最终仍以 `produce` 对编码后 MP4 的规格/时长/音轨验收和发布包的连续帧回归门禁为准。
+3. 实际查看静帧。内容段默认选择设备入场稳定后的代表帧；要检查滚动中段或末段时用 `--progress 0.5` 或 `--progress 1`。文本模式的 content 末帧必须已经没有可见词稿，片尾只能从下一帧开始；若最后一行仍留在屏幕中，视为时长/滚动回归。另需检查标题是否截断、文字与背景对比、幕帘、麦克风/设备位置、屏幕裁切和片尾画面。`still --scene all` 是预检而不是成片证明；最终仍以 `produce` 对编码后 MP4 的规格/时长/音轨验收和发布包的连续帧回归门禁为准。
 4. 从唯一最终 result 获取成片、prepared config、lock、音频/manifest 路径与 `audio.status`。必须断言 `productionGuard.policy="standard"`、`passed=true`、`checks.layout.passed=true`，并核对 `checks.audioIntent.kind/status/requestKey` 与本次意图一致；`scenes` 三段齐全，`media` 的 H.264/MP4、宽高、fps、总时长与 plan 相符，需要声音时 `audioCodec` 非空。若只有进度、没有 result 终态，按失败处理。
 
 没有自定义方向时默认不传 `--audio-kind`，CLI 走音效生成并追加稳定无缝循环、无音乐/人声/警报/突发瞬态约束，只生成一次最多 5 秒的循环素材。默认提示词会从画面/词稿识别声源；例如航空内容使用涡扇低鸣、通风、航电风扇和机身共鸣，而不使用 Mayday 对白、警报或剧情化声音。一旦传 `--bgm-prompt`，必须同时明确 `--audio-kind sound-effect|music`；CLI 不猜类型。只有用户明确给出配乐、曲风、乐器或旋律要求时才选择 Music，并追加纯器乐与旁白留白约束。只有明确要求必须新生成背景音时使用 `--bgm required`；它会为空 BGM 或内置 fallback 生成，显式本地/upload BGM 仍保留，要替换时再加 `--replace-bgm`。Key 只从环境或本机 secrets.env 读取。相同 request key 的已验证音频会在凭据与离线检查之前复用；`audio plan`、`audio generate` 与 `produce` 对相同输入使用同一 request key。未命中时，`auto` 缺 Key 会带 warning 使用现有 BGM/静音继续，`required` 或 `--replace-bgm` 缺 Key/离线时失败，不能悄悄保留旧 BGM。

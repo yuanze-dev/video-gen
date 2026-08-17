@@ -13,6 +13,13 @@ export const DEVICE_ASPECT = 2438 / 1798; // h / w of the built-in device image
 // Teleprompter text scroll speed (px per second at speed multiplier = 1).
 export const PX_PER_SEC = 130;
 
+// Text geometry shared by duration planning and the Remotion renderer. The
+// padding is based on the screen width because the rendered CSS uses the same
+// value for all four sides.
+export const TELEPROMPTER_TEXT_PADDING_RATIO = 0.07;
+export const TELEPROMPTER_TEXT_LINE_HEIGHT = 1.2;
+export const TELEPROMPTER_ESTIMATED_CHAR_WIDTH = 0.52;
+
 // Minimum content duration so very short text still gets screen time.
 export const MIN_CONTENT_SEC = 6;
 export const MAX_CONTENT_SEC = 600;

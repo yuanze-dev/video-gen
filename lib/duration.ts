@@ -4,6 +4,9 @@ import {
   MIN_CONTENT_SEC,
   MAX_CONTENT_SEC,
   DEVICE_BASE_W,
+  TELEPROMPTER_ESTIMATED_CHAR_WIDTH,
+  TELEPROMPTER_TEXT_LINE_HEIGHT,
+  TELEPROMPTER_TEXT_PADDING_RATIO,
 } from "./constants";
 import { DEFAULT_ENDING_DURATION_SEC } from "./config-schema";
 
@@ -17,17 +20,30 @@ export function openingSec(cfg: ResolvedConfig): number {
     : cfg.opening.curtain.openDurationSec;
 }
 
-// Estimate the rendered height (px) of the teleprompter text given the screen
-// width. An approximation — slight over/under-scroll is acceptable.
-function estimateTextHeight(text: string, fontSize: number, screenW: number): number {
-  const lineH = fontSize * 1.2;
-  const charW = fontSize * 0.52;
-  const perLine = Math.max(1, Math.floor(screenW / charW));
-  const paras = text.split(/\n+/);
+// Estimate the complete CSS text box, including its vertical padding. The
+// renderer finishes by translating the actual laid-out box by -100%, so this
+// estimate controls the requested px/sec pace but never decides whether the
+// final line is allowed to remain on screen.
+export function estimateTeleprompterTextBoxHeight(
+  text: string,
+  fontSize: number,
+  screenW: number,
+  screenH: number,
+): number {
+  const padding = screenW * TELEPROMPTER_TEXT_PADDING_RATIO;
+  const innerW = Math.max(1, screenW - padding * 2);
+  const lineH = fontSize * TELEPROMPTER_TEXT_LINE_HEIGHT;
+  const charW = fontSize * TELEPROMPTER_ESTIMATED_CHAR_WIDTH;
+  const perLine = Math.max(1, Math.floor(innerW / charW));
+  // white-space: pre-wrap preserves every explicit newline, including the
+  // standard four-line lead-in. Collapsing a newline run makes the planned
+  // duration shorter than the box rendered by Chromium.
+  const linesOfText = text.split("\n");
   let lines = 0;
-  for (const p of paras) lines += Math.max(1, Math.ceil(p.length / perLine));
-  lines += (paras.length - 1) * 0.7; // inter-paragraph spacing
-  return lines * lineH;
+  for (const line of linesOfText) {
+    lines += Math.max(1, Math.ceil(line.length / perLine));
+  }
+  return Math.max(screenH, lines * lineH + padding * 2);
 }
 
 export function contentSec(cfg: ResolvedConfig): number {
@@ -42,8 +58,15 @@ export function contentSec(cfg: ResolvedConfig): number {
   const deviceH = deviceW * cfg.content.device.aspectRatio;
   const screenW = deviceW * t.screen.w;
   const screenH = deviceH * t.screen.h;
-  const textH = estimateTextHeight(text.content, text.fontSize, screenW);
-  const distance = Math.max(0, textH - screenH) + screenH * 0.45; // lead-out
+  // Travel the complete text box out through the top edge. The ending starts
+  // only after this distance is complete; it may no longer replace a frame
+  // while the last line is still visible.
+  const distance = estimateTeleprompterTextBoxHeight(
+    text.content,
+    text.fontSize,
+    screenW,
+    screenH,
+  );
   const sec = distance / (PX_PER_SEC * text.speed);
   return clamp(sec, MIN_CONTENT_SEC, MAX_CONTENT_SEC);
 }

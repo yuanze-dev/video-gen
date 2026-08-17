@@ -15,7 +15,8 @@ type RenderCore = typeof import("../cli/render.ts") & typeof import("../cli/cach
 type ConfigSchema =
   typeof import("../lib/config-schema.ts") &
   typeof import("../lib/resolved.ts") &
-  typeof import("../lib/duration.ts");
+  typeof import("../lib/duration.ts") &
+  typeof import("../lib/constants.ts");
 let core: RenderCore;
 let configSchema: ConfigSchema;
 
@@ -56,6 +57,7 @@ before(async () => {
         export * from "./lib/config-schema.ts";
         export * from "./lib/resolved.ts";
         export * from "./lib/duration.ts";
+        export * from "./lib/constants.ts";
       `,
       resolveDir: root,
       loader: "ts",
@@ -90,6 +92,50 @@ test("scene still frames default to representative content and support explicit 
     () => core.frameForScene(resolved, "content", 1.1),
     /0 到 1/,
   );
+});
+
+test("text content duration covers the complete rendered text box before ending", () => {
+  const config = configSchema.makeDefaultConfig();
+  const text = config.content.teleprompter.text;
+  if (!text) assert.fail("default config must contain text teleprompter content");
+  text.content = "Short final line";
+  text.fontSize = 50;
+  text.speed = 1;
+  const resolved = configSchema.resolveConfig(config, {});
+  const deviceW = configSchema.DEVICE_BASE_W * resolved.content.device.scale;
+  const deviceH = deviceW * resolved.content.device.aspectRatio;
+  const screenW = deviceW * resolved.content.teleprompter.screen.w;
+  const screenH = deviceH * resolved.content.teleprompter.screen.h;
+  const textBoxH = configSchema.estimateTeleprompterTextBoxHeight(
+    text.content,
+    text.fontSize,
+    screenW,
+    screenH,
+  );
+
+  assert.equal(textBoxH, screenH);
+  assert.ok(
+    Math.abs(
+      configSchema.contentSec(resolved) -
+        screenH / (configSchema.PX_PER_SEC * text.speed),
+    ) < 1e-9,
+  );
+});
+
+test("text height estimation preserves every explicit blank line", () => {
+  const oneLine = configSchema.estimateTeleprompterTextBoxHeight(
+    "Final line",
+    50,
+    420,
+    1,
+  );
+  const withLeadIn = configSchema.estimateTeleprompterTextBoxHeight(
+    "\n\n\n\nFinal line",
+    50,
+    420,
+    1,
+  );
+  assert.ok(withLeadIn - oneLine >= 4 * 50 * 1.2);
 });
 
 after(async () => {

@@ -1,19 +1,21 @@
 import { OffthreadVideo, useCurrentFrame } from "remotion";
 import type { ResolvedConfig } from "../../lib/resolved";
-import { FONT_STACK } from "../../lib/constants";
+import {
+  FONT_STACK,
+  TELEPROMPTER_TEXT_LINE_HEIGHT,
+  TELEPROMPTER_TEXT_PADDING_RATIO,
+} from "../../lib/constants";
 
 type Tele = ResolvedConfig["content"]["teleprompter"];
 
 export function teleprompterScrollTransform(
   frame: number,
   contentFrames: number,
-  screenH: number,
-): { yPercent: number; leadOutY: number } {
+): { yPercent: number } {
   const progress =
     contentFrames <= 1 ? 0 : Math.max(0, Math.min(1, frame / (contentFrames - 1)));
   return {
     yPercent: progress === 0 ? 0 : -100 * progress,
-    leadOutY: screenH * 0.55 * progress,
   };
 }
 
@@ -92,13 +94,10 @@ function TeleText({
   // own travel distance, which showed up as alternating jumps in the encoded
   // video. A percentage transform is resolved from the laid-out text box at
   // paint time, so motion is a pure, linear function of the frame number.
-  // minHeight also makes the formula correct when the copy is shorter than the
-  // screen: the final line ends around 55% down the display, as before.
-  const { yPercent, leadOutY } = teleprompterScrollTransform(
-    frame,
-    contentFrames,
-    screenH,
-  );
+  // minHeight keeps short copy deterministic. Translating the complete box by
+  // -100% guarantees that every glyph has cleared the screen before the ending
+  // Sequence begins on the next frame.
+  const { yPercent } = teleprompterScrollTransform(frame, contentFrames);
 
   return (
     <div style={{ position: "absolute", inset: 0, background: text.bgColor }}>
@@ -108,15 +107,15 @@ function TeleText({
           left: 0,
           right: 0,
           top: 0,
-          padding: screenW * 0.07,
+          padding: screenW * TELEPROMPTER_TEXT_PADDING_RATIO,
           boxSizing: "border-box",
           minHeight: screenH,
-          transform: `translateY(calc(${yPercent}% + ${leadOutY}px))`,
+          transform: `translateY(${yPercent}%)`,
           color: text.color,
           fontFamily: FONT_STACK,
           fontWeight: 800,
           fontSize: text.fontSize,
-          lineHeight: 1.2,
+          lineHeight: TELEPROMPTER_TEXT_LINE_HEIGHT,
           textAlign: text.align,
           whiteSpace: "pre-wrap",
           wordBreak: "break-word",
