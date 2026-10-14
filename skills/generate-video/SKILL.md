@@ -19,6 +19,7 @@ description: 使用 Littlestart 本地 CLI 在不打开 GUI 的情况下创建�
 
 ## 决策规则
 
+- 飞书视频流水线默认按用户固定要求执行 [references/production-defaults.md](references/production-defaults.md)：每条新视频保存一次随机幕布配色，正文滚动增加 4 秒阅读时间。使用自带 `scripts/prepare-production.mjs` 准备配置后再生产；恢复时直接使用保存的配置。用户已明确授权该规则，只补丁幕布颜色不属于替换片头结构，不需要 `--allow-custom-structure`。
 - 读取或修改配置前，按需阅读 [references/config.md](references/config.md)。不要复制一份完整 schema 到对话或脚本中。
 - 编排单条、批量、离线 CI、断点恢复或错误恢复时，阅读 [references/workflows.md](references/workflows.md)。解析机器输出或退出码时，阅读 [references/protocol.md](references/protocol.md)。
 - 默认不覆盖已有产物。只有用户明确允许替换时才加 `--force`。

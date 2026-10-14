@@ -68,3 +68,6 @@ secrets.env
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local video production artifacts
+/.codex-video-*/
